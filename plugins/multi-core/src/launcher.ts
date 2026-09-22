@@ -236,25 +236,33 @@ async function main() {
   }
   configureApproval(settings, approvalProviders, selectedModel, { antigravity, grok }, anthropic);
   await writeFile(settingsFile, JSON.stringify(settings), { mode: 0o600 });
-  const definitions = JSON.stringify(agents);
   const childEnvironment = gatewayEnvironment(address.port, token, anthropic, Boolean(cursor));
   const claudePath = resolveExecutable('claude', {
     configuredPath: claudeExecutable,
     env: childEnvironment,
   });
-  const childArguments = launcherArguments(
-    args,
-    settingsFile,
-    definitions,
-    pluginInventory,
-    pluginRoot,
-  );
-  const childInvocation = executableInvocation(
-    claudePath,
-    childArguments,
-    process.platform,
-    childEnvironment,
-  );
+  const buildInvocation = () =>
+    executableInvocation(
+      claudePath,
+      launcherArguments(args, settingsFile, JSON.stringify(agents), pluginInventory, pluginRoot),
+      process.platform,
+      childEnvironment,
+    );
+  let childInvocation = buildInvocation();
+  // Windows caps a cmd.exe command line at 8,000 characters, and every enabled
+  // provider's workers share that one budget. Rather than refusing to start and
+  // leaving the user to hand-tune three env vars, shed the effort variants
+  // first: they are the multiplicative part of the set, and /effort still
+  // reaches the same reasoning levels on the base worker.
+  if (argumentLimitOverrun(childInvocation, process.platform) > 0) {
+    const dropped = dropEffortVariants(agents);
+    if (dropped.length) {
+      childInvocation = buildInvocation();
+      console.error(
+        `Native gateway: dropped ${dropped.length} effort-variant workers to fit the Windows command-line limit. The base worker for each model is still registered; use /effort to change reasoning level.`,
+      );
+    }
+  }
   try {
     checkLauncherArgumentLimit(agents, childInvocation, claudePath, process.platform);
   } catch (error) {
@@ -744,21 +752,55 @@ interface LauncherInvocation {
   viaComSpec?: boolean;
 }
 
+const EFFORT_SUFFIX = /-(minimal|low|medium|high|xhigh|max)$/;
+
+/** How far the assembled command line is over the platform's limit, or 0 when
+ *  it fits. Windows is the only platform that caps this low enough to matter. */
+export function argumentLimitOverrun(
+  invocation: LauncherInvocation,
+  platform: NodeJS.Platform = process.platform,
+): number {
+  if (platform !== 'win32') {
+    return 0;
+  }
+  const viaComSpec = invocation.viaComSpec ?? /(?:^|[\\/])cmd\.exe$/i.test(invocation.command);
+  const limit = viaComSpec ? 8000 : 32000;
+  const commandLine = [invocation.command, ...invocation.args].join(' ');
+  return Math.max(0, commandLine.length - limit);
+}
+
+/** Drop every effort-variant worker in place, returning the names removed.
+ *  Effort variants multiply each model by its reasoning levels (OpenAI alone
+ *  ships four models across six levels), so they dominate the command line
+ *  while adding no model the base worker cannot reach via /effort. Mutates the
+ *  caller's object so the permission loader and agent catalog, which hold the
+ *  same reference, stay in step with what actually gets registered. */
+export function dropEffortVariants(agents: Record<string, AgentDefinition>): string[] {
+  const dropped: string[] = [];
+  for (const name of Object.keys(agents)) {
+    const base = name.replace(EFFORT_SUFFIX, '');
+    // Only a worker whose unsuffixed sibling serves the same model is a variant;
+    // a model whose own id merely ends in an effort word keeps its row.
+    if (base !== name && agents[base]?.model === agents[name].model) {
+      delete agents[name];
+      dropped.push(name);
+    }
+  }
+  return dropped;
+}
+
 export function checkLauncherArgumentLimit(
   agents: Record<string, AgentDefinition>,
   invocation: LauncherInvocation,
   executable: string,
   platform: NodeJS.Platform = process.platform,
 ): void {
-  if (platform !== 'win32') {
+  if (argumentLimitOverrun(invocation, platform) === 0) {
     return;
   }
   const viaComSpec = invocation.viaComSpec ?? /(?:^|[\\/])cmd\.exe$/i.test(invocation.command);
   const limit = viaComSpec ? 8000 : 32000;
   const commandLine = [invocation.command, ...invocation.args].join(' ');
-  if (commandLine.length <= limit) {
-    return;
-  }
   const providers = new Map<string, number>();
   for (const [name, agent] of Object.entries(agents)) {
     const provider = agent.model.split('/')[1] ?? 'unknown';
@@ -774,7 +816,7 @@ export function checkLauncherArgumentLimit(
     .join(', ');
   const shim = viaComSpec ? ' cmd.exe shim' : '';
   throw new Error(
-    `Native worker registration needs ${commandLine.length.toLocaleString('en-US')} characters for ${executable}, above the Windows${shim} limit of ${limit.toLocaleString('en-US')}. Largest providers: ${largest || 'none'}. Disable providers or extra models to reduce the launcher arguments.`,
+    `Native worker registration needs ${commandLine.length.toLocaleString('en-US')} characters for ${executable}, above the Windows${shim} limit of ${limit.toLocaleString('en-US')}, even after dropping effort variants. Largest providers: ${largest || 'none'}. Narrow a provider with MULTI_ZEN_MODELS, MULTI_GO_MODELS or MULTI_GROK_MODELS ("none" hides one entirely), or disable a provider plugin.`,
   );
 }
 

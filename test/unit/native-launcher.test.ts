@@ -8,7 +8,9 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { AgentCatalog } from '../../plugins/multi-core/src/gateway/agent-catalog.ts';
 import {
+  argumentLimitOverrun,
   checkLauncherArgumentLimit,
+  dropEffortVariants,
   workerDefinitions,
 } from '../../plugins/multi-core/src/launcher.ts';
 import { cursorModelOptions, cursorPickerOptions } from '../../plugins/multi-cursor/src/models.ts';
@@ -674,7 +676,7 @@ test('launcher argument limits are platform-aware and identify largest providers
   };
   assert.throws(
     () => checkLauncherArgumentLimit(agents, invocation, 'claude.exe', 'win32'),
-    /above the Windows limit of 32,000.*openai.*Disable providers or extra models/,
+    /above the Windows limit of 32,000.*openai.*MULTI_ZEN_MODELS/,
   );
   assert.doesNotThrow(() =>
     checkLauncherArgumentLimit(
@@ -693,6 +695,49 @@ test('launcher argument limits are platform-aware and identify largest providers
         'win32',
       ),
     /Windows cmd.exe shim limit of 8,000/,
+  );
+});
+
+test('effort variants are shed to fit the command line, keeping one worker per model', () => {
+  const agents = {
+    'openai-luna': { model: 'multi/openai/luna', description: '', prompt: '', tools: ['Read'] },
+    'openai-luna-low': { model: 'multi/openai/luna', description: '', prompt: '', tools: ['Read'] },
+    'openai-luna-high': {
+      model: 'multi/openai/luna',
+      description: '',
+      prompt: '',
+      tools: ['Read'],
+    },
+    // Shares the variant spelling but serves its own model, so it is not a variant.
+    'zen-go-grok-4.7-max': {
+      model: 'multi/zen/go/grok-4.7-max',
+      description: '',
+      prompt: '',
+      tools: ['Read'],
+    },
+    'zen-go-kimi-k3': {
+      model: 'multi/zen/go/kimi-k3',
+      description: '',
+      prompt: '',
+      tools: ['Read'],
+    },
+  };
+  const dropped = dropEffortVariants(agents);
+  assert.deepEqual(dropped.sort(), ['openai-luna-high', 'openai-luna-low']);
+  assert.deepEqual(Object.keys(agents).sort(), [
+    'openai-luna',
+    'zen-go-grok-4.7-max',
+    'zen-go-kimi-k3',
+  ]);
+});
+
+test('argument limit overrun is reported only for Windows command lines that exceed it', () => {
+  const overLimit = { command: 'cmd.exe', args: ['/c', 'claude.cmd', 'x'.repeat(8000)] };
+  assert.equal(argumentLimitOverrun(overLimit, 'darwin'), 0);
+  assert.ok(argumentLimitOverrun(overLimit, 'win32') > 0);
+  assert.equal(
+    argumentLimitOverrun({ command: 'cmd.exe', args: ['/c', 'x'.repeat(100)] }, 'win32'),
+    0,
   );
 });
 
