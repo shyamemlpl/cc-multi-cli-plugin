@@ -666,7 +666,12 @@ export function workerDefinitions(
       ...(option.effort ? { effort: option.effort } : {}),
     };
   }
-  for (const [name, option] of Object.entries(zen ? goWorkers() : {})) {
+  // Keep worker registration in lockstep with the picker's own Go selection
+  // (see pickerSettings): both must agree on which ids are "in", and neither
+  // may silently default to the full live catalog on Windows (see
+  // DEFAULT_GO_MODELS in models.ts for why).
+  const goWorkerIds = goPickerOptions(process.env.MULTI_GO_MODELS).map((option) => option.id);
+  for (const [name, option] of Object.entries(zen ? goWorkers(goWorkerIds) : {})) {
     agents[name] = {
       description: `OpenCode Go ${option.model}${option.effort ? `, ${option.effort} effort` : ''}. Uses native Claude Code tools.`,
       prompt: WORKER_PROMPT,
@@ -1128,15 +1133,15 @@ function pickerSettings(
 ) {
   let zenOptions = zenPickerOptions('');
   // Go shares no id namespace guarantee with Zen (the same bare id, e.g.
-  // "kimi-k3", can legitimately exist in both catalogs), so it does not reuse
-  // MULTI_ZEN_MODELS for filtering: an id meant for one would misresolve or
-  // wrongly throw against the other's own picker. Go's catalog is small
-  // enough to show in full whenever it is connected; per-id curation can
-  // follow once that turns out to matter in practice.
+  // "kimi-k3", can legitimately exist in both catalogs), so it uses its own
+  // MULTI_GO_MODELS selection rather than reusing MULTI_ZEN_MODELS: an id
+  // meant for one would misresolve or wrongly throw against the other's own
+  // picker. It defaults to a small curated subset, not the full 30+ model
+  // live catalog — see DEFAULT_GO_MODELS for why (Windows argument limit).
   let goOptions = goPickerOptions('');
   if (zen) {
     zenOptions = fullCatalog ? zenModelOptions() : zenPickerOptions(process.env.MULTI_ZEN_MODELS);
-    goOptions = goModelOptions();
+    goOptions = fullCatalog ? goModelOptions() : goPickerOptions(process.env.MULTI_GO_MODELS);
   }
   const settings: LaunchSettings = {
     modelPicker: {

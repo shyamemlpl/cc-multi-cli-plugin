@@ -279,6 +279,23 @@ function goRoute(id: string): string {
   return `multi/zen/go/${id}`;
 }
 
+// Windows launches the native worker through cmd.exe, which caps the whole
+// command line at 8,000 characters (see checkLauncherArgumentLimit). Go's
+// live-discovered catalog runs to 30+ models; registering every one of them
+// as a full named worker blew past that limit even before Cursor or
+// Antigravity were counted. One representative model per vendor family keeps
+// the default well inside budget; the full catalog stays inspectable via
+// --go-models and selectable through MULTI_GO_MODELS.
+const DEFAULT_GO_MODELS = [
+  'kimi-k3',
+  'glm-5.3',
+  'deepseek-v4-pro',
+  'minimax-m3',
+  'qwen3.8-max',
+  'grok-4.7',
+  'gpt-5.6-luna',
+];
+
 export function goModel(id: string): ZenModel | undefined {
   return cachedGoModels().find((model) => model.id === id);
 }
@@ -296,32 +313,48 @@ export function goModelOptions(availableIds?: readonly string[]): ZenModelOption
     }));
 }
 
-export function goWorkers(): Readonly<Record<string, ZenWorker>> {
+/** Named workers for the given Go models (default: the curated subset). Callers
+ *  that want the full live catalog as workers must pass every id explicitly
+ *  and accept the Windows command-line risk that comes with it. */
+export function goWorkers(ids: readonly string[] = DEFAULT_GO_MODELS): Readonly<Record<string, ZenWorker>> {
+  const available = new Set(cachedGoModels().map((model) => model.id));
   return Object.freeze(
     Object.fromEntries(
-      cachedGoModels().flatMap((model) => {
-        const base: [string, ZenWorker][] = [
-          [goWorkerName(model.id), { model: goRoute(model.id), effort: defaultEffort(model) }],
-        ];
-        const efforts: [string, ZenWorker][] = (model.efforts ?? []).map((effort) => [
-          `${goWorkerName(model.id)}-${effort}`,
-          { model: goRoute(model.id), effort },
-        ]);
-        return [...base, ...efforts];
-      }),
+      ids
+        .filter((id) => available.has(id))
+        .flatMap((id) => {
+          const model = goModel(id) as ZenModel;
+          const base: [string, ZenWorker][] = [
+            [goWorkerName(model.id), { model: goRoute(model.id), effort: defaultEffort(model) }],
+          ];
+          const efforts: [string, ZenWorker][] = (model.efforts ?? []).map((effort) => [
+            `${goWorkerName(model.id)}-${effort}`,
+            { model: goRoute(model.id), effort },
+          ]);
+          return [...base, ...efforts];
+        }),
     ),
   );
 }
 
-/** Restrict Go rows the same way zenPickerOptions restricts Zen rows. Returns
- *  an empty picker (never throws) when Go is not entitled or not yet
- *  discovered, so an unconfigured Go account behaves like a disconnected
- *  provider instead of breaking startup. */
+/** Restrict Go rows to an explicit selection, or the curated default when none
+ *  is given. Never the full live catalog by default: at 30+ models, that blows
+ *  past the Windows cmd.exe command-line limit once combined with the other
+ *  providers' native workers (see checkLauncherArgumentLimit). Returns an
+ *  empty picker (never throws) when Go is not entitled or not yet discovered,
+ *  so an unconfigured Go account behaves like a disconnected provider instead
+ *  of breaking startup. Uses its own MULTI_GO_MODELS selection, not
+ *  MULTI_ZEN_MODELS: the same bare id can exist in both catalogs, so one
+ *  shared list could either wrongly show a Zen-only id as a Go row or throw
+ *  on a Go-only id that Zen's own picker does not recognize. */
 export function goPickerOptions(selection: string | undefined): ZenModelOption[] {
   if (!cachedGoModels().length) {
     return [];
   }
   if (selection === undefined) {
+    return goModelOptions(DEFAULT_GO_MODELS);
+  }
+  if (selection === 'all') {
     return goModelOptions();
   }
   return [
@@ -334,7 +367,7 @@ export function goPickerOptions(selection: string | undefined): ZenModelOption[]
   ].map((id) => {
     const option = goModelOptions([id])[0];
     if (!option) {
-      throw new Error(`MULTI_ZEN_MODELS: unknown OpenCode Go model: ${id}`);
+      throw new Error(`MULTI_GO_MODELS: unknown OpenCode Go model: ${id}`);
     }
     return option;
   });
