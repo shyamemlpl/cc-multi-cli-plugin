@@ -1,4 +1,5 @@
 import type { Effort } from '../../multi-openai/src/responses.ts';
+import { cachedGoModels } from './go-catalog.ts';
 
 type ZenProtocol = 'responses' | 'chat';
 
@@ -262,6 +263,81 @@ function defaultEffort(model: ZenModel): Effort | undefined {
 
 export function zenModel(id: string): ZenModel | undefined {
   return modelById.get(id);
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode Go: same account and request shapes as Zen, but a live-discovered,
+// separately entitled catalog (see go-catalog.ts) routed under `multi/zen/go/`
+// so a Go id can never collide with a hand-curated Zen id above.
+// ---------------------------------------------------------------------------
+
+function goWorkerName(id: string): string {
+  return `zen-go-${id}`;
+}
+
+function goRoute(id: string): string {
+  return `multi/zen/go/${id}`;
+}
+
+export function goModel(id: string): ZenModel | undefined {
+  return cachedGoModels().find((model) => model.id === id);
+}
+
+/** Build Go picker rows, optionally intersected with an explicit id selection. */
+export function goModelOptions(availableIds?: readonly string[]): ZenModelOption[] {
+  const available = availableIds === undefined ? undefined : new Set(availableIds);
+  return cachedGoModels()
+    .filter((model) => available?.has(model.id) ?? true)
+    .map((model) => ({
+      ...model,
+      model: goRoute(model.id),
+      worker: goWorkerName(model.id),
+      nativeWorker: true,
+    }));
+}
+
+export function goWorkers(): Readonly<Record<string, ZenWorker>> {
+  return Object.freeze(
+    Object.fromEntries(
+      cachedGoModels().flatMap((model) => {
+        const base: [string, ZenWorker][] = [
+          [goWorkerName(model.id), { model: goRoute(model.id), effort: defaultEffort(model) }],
+        ];
+        const efforts: [string, ZenWorker][] = (model.efforts ?? []).map((effort) => [
+          `${goWorkerName(model.id)}-${effort}`,
+          { model: goRoute(model.id), effort },
+        ]);
+        return [...base, ...efforts];
+      }),
+    ),
+  );
+}
+
+/** Restrict Go rows the same way zenPickerOptions restricts Zen rows. Returns
+ *  an empty picker (never throws) when Go is not entitled or not yet
+ *  discovered, so an unconfigured Go account behaves like a disconnected
+ *  provider instead of breaking startup. */
+export function goPickerOptions(selection: string | undefined): ZenModelOption[] {
+  if (!cachedGoModels().length) {
+    return [];
+  }
+  if (selection === undefined) {
+    return goModelOptions();
+  }
+  return [
+    ...new Set(
+      selection
+        .split(',')
+        .map((id) => id.trim())
+        .filter(Boolean),
+    ),
+  ].map((id) => {
+    const option = goModelOptions([id])[0];
+    if (!option) {
+      throw new Error(`MULTI_ZEN_MODELS: unknown OpenCode Go model: ${id}`);
+    }
+    return option;
+  });
 }
 
 /** Restrict Zen rows without hiding subscription providers. */

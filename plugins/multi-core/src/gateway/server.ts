@@ -526,7 +526,8 @@ export function createNativeGateway({
       return res.end(JSON.stringify({ input_tokens: prepared.inputTokens }));
     }
     onEvent({ route: 'zen-request', agentId, model: body.model });
-    const upstream = await fetchImpl(`https://opencode.ai/zen/v1/${prepared.endpoint}`, {
+    const zenBase = prepared.isGo ? 'https://opencode.ai/zen/go/v1/' : 'https://opencode.ai/zen/v1/';
+    const upstream = await fetchImpl(`${zenBase}${prepared.endpoint}`, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${zen.apiKey}`,

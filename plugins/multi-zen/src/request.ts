@@ -4,7 +4,7 @@ import type { ResponsesInputContent, ResponsesRequest } from '../../multi-openai
 import { toResponses } from '../../multi-openai/src/responses.ts';
 import { toChat } from './chat.ts';
 import type { ZenModel } from './models.ts';
-import { zenModel } from './models.ts';
+import { goModel, zenModel } from './models.ts';
 
 function validateMedia(request: ResponsesRequest, model: ZenModel) {
   const check = (part: ResponsesInputContent) => {
@@ -30,9 +30,15 @@ function validateMedia(request: ResponsesRequest, model: ZenModel) {
 
 /** Pure translation keeps repeated prefixes byte-stable; the caller owns credentials. */
 export function zenRequest(body: MessagesRequest, cacheKey: string) {
-  const model = zenModel(body.model?.replace(/^multi\/zen\//, '') ?? '');
-  if (!model || body.model !== `multi/zen/${model.id}`) {
-    throw new Error('Unknown Zen model. Run the launcher with --zen-models for supported choices.');
+  const rawId = body.model?.replace(/^multi\/zen\//, '') ?? '';
+  const isGo = rawId.startsWith('go/');
+  const model = isGo ? goModel(rawId.slice('go/'.length)) : zenModel(rawId);
+  if (!model || body.model !== `multi/zen/${isGo ? 'go/' : ''}${model.id}`) {
+    throw new Error(
+      isGo
+        ? 'Unknown OpenCode Go model. Run the launcher with --zen-models for supported choices.'
+        : 'Unknown Zen model. Run the launcher with --zen-models for supported choices.',
+    );
   }
   if (
     body.max_tokens !== undefined &&
@@ -51,7 +57,7 @@ export function zenRequest(body: MessagesRequest, cacheKey: string) {
       `${model.id} does not support effort ${effort}. Reset /effort to auto to use its native default.`,
     );
   }
-  const common = { signaturePrefix, inputTokens: estimateInputTokens(normalized) };
+  const common = { signaturePrefix, inputTokens: estimateInputTokens(normalized), isGo };
   if (model.protocol === 'chat') {
     // Claude supplies an effort even for models with no adjustable effort. These
     // catalog entries explicitly use native reasoning, with no effort presets.

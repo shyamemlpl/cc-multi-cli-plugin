@@ -39,7 +39,11 @@ import { readCodexAuth } from '../../multi-openai/src/auth.ts';
 import { MODELS, OPENAI_WORKERS } from '../../multi-openai/src/models.ts';
 import type { Effort } from '../../multi-openai/src/responses.ts';
 import { readZenKey } from '../../multi-zen/src/auth.ts';
+import { refreshGoModels } from '../../multi-zen/src/go-catalog.ts';
 import {
+  goModelOptions,
+  goPickerOptions,
+  goWorkers,
   ZEN_MODELS,
   ZEN_WORKERS,
   zenModelOptions,
@@ -120,6 +124,12 @@ async function main() {
   );
   const { codexSignedIn, openaiReview } = await discoverOpenAI(authFile);
   const zenKey = providerEnabled('zen') ? await readZenKey() : undefined;
+  // Go shares Zen's account and key but is a separately entitled catalog:
+  // an unentitled key just leaves the cache empty, same as a disconnected
+  // provider, rather than failing startup.
+  if (zenKey) {
+    await refreshGoModels({ apiKey: zenKey });
+  }
   const antigravityModels = await discoverAntigravity();
   const grokModels = await discoverGrok();
   const token = randomBytes(32).toString('hex');
@@ -656,6 +666,15 @@ export function workerDefinitions(
       ...(option.effort ? { effort: option.effort } : {}),
     };
   }
+  for (const [name, option] of Object.entries(zen ? goWorkers() : {})) {
+    agents[name] = {
+      description: `OpenCode Go ${option.model}${option.effort ? `, ${option.effort} effort` : ''}. Uses native Claude Code tools.`,
+      prompt: WORKER_PROMPT,
+      model: option.model,
+      tools: ['Read', 'Grep', 'Glob', 'Bash', 'Edit', 'Write'],
+      ...(option.effort ? { effort: option.effort } : {}),
+    };
+  }
   for (const option of [...antigravityModels, ...antigravityPickerOptions(antigravityModels)]) {
     const effort = option.id.match(/-(low|medium|high)$/)?.[1] as Effort | undefined;
     agents[option.worker] = {
@@ -966,9 +985,18 @@ async function handleCommand(command?: string) {
     console.log(JSON.stringify(ZEN_MODELS, null, 2));
     process.exit(0);
   }
+  if (command === '--go-models') {
+    const result = await refreshGoModels();
+    if (result.status !== 'available') {
+      console.log(JSON.stringify(result, null, 2));
+      process.exit(1);
+    }
+    console.log(JSON.stringify(result.models, null, 2));
+    process.exit(0);
+  }
   if (command === '--help') {
     console.log(
-      'Usage: node plugins/multi-core/src/launcher.ts [--cursor-login | --cursor-models | --zen-models | --antigravity-models | --antigravity-setup] [-- <claude arguments>]\nLaunch Claude with external models and native coding workers.\n--cursor-login: official Cursor SDK browser sign-in\n--cursor-models: list account model choices and worker names\n--zen-models: list supported Zen models and capabilities\nMULTI_ANTIGRAVITY=1: enable native Antigravity models and workers\n--antigravity-setup: install the scoped native permission hook\n--antigravity-models: inspect the official Antigravity CLI catalog (native login required)\n--grok-models: list the Grok Build catalog (native login required)\nMULTI_GROK_MODELS: comma-separated Grok model IDs to show, leaving other providers unchanged\nOPENCODE_API_KEY: Zen key (or use OpenCode /connect)\nMULTI_ZEN_MODELS: comma-separated Zen model IDs to show, leaving other providers unchanged\nMULTI_MODELS: comma-separated full model IDs to show in /model (unset: defaults; empty: hide external rows)\nMULTI_CURSOR_EXTRA_MODELS: comma-separated Cursor model IDs to add to Auto, Grok 4.6, and Composer 2.5 in /model',
+      'Usage: node plugins/multi-core/src/launcher.ts [--cursor-login | --cursor-models | --zen-models | --go-models | --antigravity-models | --antigravity-setup] [-- <claude arguments>]\nLaunch Claude with external models and native coding workers.\n--cursor-login: official Cursor SDK browser sign-in\n--cursor-models: list account model choices and worker names\n--zen-models: list supported Zen models and capabilities\n--go-models: fetch the live OpenCode Go catalog (Go entitlement required)\nMULTI_ANTIGRAVITY=1: enable native Antigravity models and workers\n--antigravity-setup: install the scoped native permission hook\n--antigravity-models: inspect the official Antigravity CLI catalog (native login required)\n--grok-models: list the Grok Build catalog (native login required)\nMULTI_GROK_MODELS: comma-separated Grok model IDs to show, leaving other providers unchanged\nOPENCODE_API_KEY: Zen key (or use OpenCode /connect)\nMULTI_ZEN_MODELS: comma-separated Zen model IDs to show, leaving other providers unchanged\nMULTI_MODELS: comma-separated full model IDs to show in /model (unset: defaults; empty: hide external rows)\nMULTI_CURSOR_EXTRA_MODELS: comma-separated Cursor model IDs to add to Auto, Grok 4.6, and Composer 2.5 in /model',
     );
     process.exit(0);
   }
@@ -1099,8 +1127,16 @@ function pickerSettings(
   fullCatalog = false,
 ) {
   let zenOptions = zenPickerOptions('');
+  // Go shares no id namespace guarantee with Zen (the same bare id, e.g.
+  // "kimi-k3", can legitimately exist in both catalogs), so it does not reuse
+  // MULTI_ZEN_MODELS for filtering: an id meant for one would misresolve or
+  // wrongly throw against the other's own picker. Go's catalog is small
+  // enough to show in full whenever it is connected; per-id curation can
+  // follow once that turns out to matter in practice.
+  let goOptions = goPickerOptions('');
   if (zen) {
     zenOptions = fullCatalog ? zenModelOptions() : zenPickerOptions(process.env.MULTI_ZEN_MODELS);
+    goOptions = goModelOptions();
   }
   const settings: LaunchSettings = {
     modelPicker: {
@@ -1137,6 +1173,12 @@ function pickerSettings(
           label: `Zen · ${label}`,
           behavesAs: pickerProfile(Boolean(efforts?.length)),
           description: `Zen API billing · Claude tools${efforts ? '' : ' · native reasoning; /effort not applicable'}`,
+        })),
+        ...goOptions.map(({ model, label, efforts }) => ({
+          model,
+          label: `Go · ${label}`,
+          behavesAs: pickerProfile(Boolean(efforts?.length)),
+          description: `OpenCode Go subscription · Claude tools${efforts ? '' : ' · native reasoning; /effort not applicable'}`,
         })),
       ],
     },
