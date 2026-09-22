@@ -242,20 +242,39 @@ export function zenModelOptions(availableIds?: readonly string[]): ZenModelOptio
   }));
 }
 
-export const ZEN_WORKERS: Readonly<Record<string, ZenWorker>> = Object.freeze(
-  Object.fromEntries(
-    ZEN_MODELS.flatMap((model) => {
-      const base = [
-        [workerName(model.id), { model: route(model.id), effort: defaultEffort(model) }],
-      ];
-      const efforts = (model.efforts ?? []).map((effort) => [
-        `${workerName(model.id)}-${effort}`,
-        { model: route(model.id), effort },
-      ]);
-      return [...base, ...efforts];
-    }),
-  ),
-);
+function buildZenWorkers(models: readonly ZenModel[]): Readonly<Record<string, ZenWorker>> {
+  return Object.freeze(
+    Object.fromEntries(
+      models.flatMap((model) => {
+        const base: [string, ZenWorker][] = [
+          [workerName(model.id), { model: route(model.id), effort: defaultEffort(model) }],
+        ];
+        const efforts: [string, ZenWorker][] = (model.efforts ?? []).map((effort) => [
+          `${workerName(model.id)}-${effort}`,
+          { model: route(model.id), effort },
+        ]);
+        return [...base, ...efforts];
+      }),
+    ),
+  );
+}
+
+export const ZEN_WORKERS: Readonly<Record<string, ZenWorker>> = buildZenWorkers(ZEN_MODELS);
+
+/** Named workers for an explicit Zen id selection (e.g. from
+ *  zenPickerOptions(process.env.MULTI_ZEN_MODELS)), or the full fixed catalog
+ *  when no selection is given — preserves the historical default of
+ *  registering every Zen model. MULTI_ZEN_MODELS otherwise only narrowed the
+ *  /model picker, leaving worker registration (and its Windows cmd.exe
+ *  argument footprint) unchanged even when a caller has no Zen entitlement
+ *  at all, e.g. an OpenCode Go-only account. */
+export function zenWorkers(ids?: readonly string[]): Readonly<Record<string, ZenWorker>> {
+  if (ids === undefined) {
+    return ZEN_WORKERS;
+  }
+  const selected = new Set(ids);
+  return buildZenWorkers(ZEN_MODELS.filter((model) => selected.has(model.id)));
+}
 
 function defaultEffort(model: ZenModel): Effort | undefined {
   return model.efforts?.includes('medium') ? 'medium' : undefined;

@@ -45,9 +45,9 @@ import {
   goPickerOptions,
   goWorkers,
   ZEN_MODELS,
-  ZEN_WORKERS,
   zenModelOptions,
   zenPickerOptions,
+  zenWorkers,
 } from '../../multi-zen/src/models.ts';
 import { AgentCatalog } from './gateway/agent-catalog.ts';
 import {
@@ -657,7 +657,16 @@ export function workerDefinitions(
       tools: ['Read', 'Grep', 'Glob', 'Bash', 'Edit', 'Write'],
     };
   }
-  for (const [name, option] of Object.entries(zen ? ZEN_WORKERS : {})) {
+  // Registering every Zen model unconditionally used to ignore MULTI_ZEN_MODELS
+  // entirely, so an account with no Zen entitlement (e.g. OpenCode Go-only)
+  // still paid the full catalog's Windows cmd.exe argument cost with no way to
+  // shrink it. Leaving MULTI_ZEN_MODELS unset keeps the historical full-catalog
+  // default; setting it (including to "") narrows workers to match the picker.
+  const zenWorkerIds =
+    process.env.MULTI_ZEN_MODELS === undefined
+      ? undefined
+      : zenPickerOptions(process.env.MULTI_ZEN_MODELS).map((option) => option.id);
+  for (const [name, option] of Object.entries(zen ? zenWorkers(zenWorkerIds) : {})) {
     agents[name] = {
       description: `OpenCode Zen ${option.model}${option.effort ? `, ${option.effort} effort` : ''}. Uses native Claude Code tools.`,
       prompt: WORKER_PROMPT,
