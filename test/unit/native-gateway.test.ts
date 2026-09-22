@@ -88,6 +88,12 @@ const textEvents = events({ type: 'message', content: [{ type: 'output_text', te
 ]);
 const callId = (item: ResponsesInputItem): string | undefined =>
   'call_id' in item ? item.call_id : undefined;
+/** Every tool built from these fixtures is a declared function tool; narrow for the assertions. */
+function functionTool(tool: { type: string }): { type: 'function'; name: string; strict: boolean } {
+  assert.equal(tool.type, 'function');
+  return tool as { type: 'function'; name: string; strict: boolean };
+}
+const functionToolName = (tool: { type: string }): string => functionTool(tool).name;
 const contentOf = (item: ResponsesInputItem): ResponsesInputContent[] =>
   'content' in item ? item.content : [];
 function isMessagesResponse(value: unknown): value is MessagesResponse {
@@ -146,7 +152,7 @@ test('native conversion preserves tool IDs, error results, permissions text and 
   assert.deepEqual(result.tool_choice, { type: 'function', name: 'Read' });
   assert.equal(result.parallel_tool_calls, false);
   assert.equal(result.store, false);
-  assert.equal(result.tools[0].strict, false);
+  assert.equal(functionTool(result.tools[0]).strict, false);
   assert.throws(
     () =>
       toResponses(
@@ -156,9 +162,29 @@ test('native conversion preserves tool IDs, error results, permissions text and 
     /Unsupported/,
   );
   assert.throws(
-    () => toResponses({ ...body, tools: [{ type: 'web_search_20250305' }] }, 'gpt'),
+    () => toResponses({ ...body, tools: [{ type: 'bash_20250124' }] }, 'gpt'),
     /Unsupported/,
   );
+  const webSearch = toResponses(
+    {
+      ...body,
+      tools: [
+        {
+          type: 'web_search_20250305',
+          name: 'web_search',
+          max_uses: 5,
+          allowed_domains: ['example.com'],
+          user_location: { type: 'approximate', city: 'San Francisco' },
+        },
+      ],
+    },
+    'gpt',
+  );
+  assert.deepEqual(webSearch.tools[0], {
+    type: 'web_search',
+    filters: { allowed_domains: ['example.com'] },
+    user_location: { type: 'approximate', city: 'San Francisco' },
+  });
 });
 
 test('Responses stream preserves native tool arguments, usage and stop reason', async () => {
@@ -195,6 +221,67 @@ test('Responses stream preserves native tool arguments, usage and stop reason', 
       : [],
   );
   assert.equal(partial.join(''), args);
+});
+
+test('web search calls become server_tool_use/result blocks with citations', async () => {
+  const searchItem: SseEvent = {
+    type: 'web_search_call',
+    id: 'ws_1',
+    status: 'completed',
+    action: {
+      type: 'search',
+      query: 'claude shannon birth date',
+      sources: [
+        { url: 'https://en.wikipedia.org/wiki/Claude_Shannon', title: 'Claude Shannon - Wikipedia' },
+      ],
+    },
+  };
+  const citedText = 'Claude Shannon was born in 1916.';
+  const messageItem: SseEvent = {
+    type: 'message',
+    content: [
+      {
+        type: 'output_text',
+        text: citedText,
+        annotations: [
+          {
+            type: 'url_citation',
+            url: 'https://en.wikipedia.org/wiki/Claude_Shannon',
+            title: 'Claude Shannon - Wikipedia',
+            start_index: 0,
+            end_index: citedText.length,
+          },
+        ],
+      },
+    ],
+  };
+  const result = await fromResponses(
+    stream([
+      { type: 'response.created', response: { id: 'resp_test', usage: null } },
+      { type: 'response.output_item.added', output_index: 0, item: searchItem },
+      { type: 'response.output_item.done', output_index: 0, item: searchItem },
+      { type: 'response.output_item.added', output_index: 1, item: { type: 'message', content: [] } },
+      { type: 'response.output_text.delta', output_index: 1, delta: citedText },
+      { type: 'response.output_item.done', output_index: 1, item: messageItem },
+      {
+        type: 'response.completed',
+        response: { id: 'resp_test', usage: { input_tokens: 100, output_tokens: 15 } },
+      },
+    ]),
+    model,
+  );
+  assert.equal(result.content.length, 3);
+  const [useBlock, resultBlock, textBlock] = result.content;
+  assert(useBlock.type === 'server_tool_use');
+  assert.equal(useBlock.name, 'web_search');
+  assert.deepEqual(useBlock.input, { query: 'claude shannon birth date' });
+  assert(resultBlock.type === 'web_search_tool_result');
+  assert.equal(resultBlock.tool_use_id, useBlock.id);
+  assert(Array.isArray(resultBlock.content));
+  assert.equal(resultBlock.content[0]?.url, 'https://en.wikipedia.org/wiki/Claude_Shannon');
+  assert(textBlock.type === 'text');
+  assert.equal(textBlock.citations?.[0]?.url, 'https://en.wikipedia.org/wiki/Claude_Shannon');
+  assert.equal(textBlock.citations?.[0]?.cited_text, citedText);
 });
 
 test('images retain their order and tool-result association across provider switches', () => {
@@ -894,15 +981,18 @@ test('long MCP names round-trip across tool definitions, calls, choices and fres
     tool_choice: { type: 'tool', name },
   };
   const converted = toResponses(request, 'gpt');
-  assert(converted.tools.every((t) => t.name.length <= 64));
-  assert.notEqual(converted.tools[0].name, converted.tools[1].name);
-  assert.deepEqual(converted.tool_choice, { type: 'function', name: converted.tools[0].name });
+  assert(converted.tools.every((t) => functionToolName(t).length <= 64));
+  assert.notEqual(functionToolName(converted.tools[0]), functionToolName(converted.tools[1]));
+  assert.deepEqual(converted.tool_choice, {
+    type: 'function',
+    name: functionToolName(converted.tools[0]),
+  });
   const reply = await fromResponses(
     stream(
       events({
         type: 'function_call',
         call_id: 'call_1',
-        name: converted.tools[0].name,
+        name: functionToolName(converted.tools[0]),
         arguments: '{}',
       }),
     ),
@@ -924,7 +1014,7 @@ test('long MCP names round-trip across tool definitions, calls, choices and fres
     },
     'gpt',
   );
-  assert.equal((resumed.input[0] as { name: string }).name, converted.tools[0].name);
+  assert.equal((resumed.input[0] as { name: string }).name, functionToolName(converted.tools[0]));
   const longId = `toolu_${'x'.repeat(150)}`;
   const history = toResponses(
     {

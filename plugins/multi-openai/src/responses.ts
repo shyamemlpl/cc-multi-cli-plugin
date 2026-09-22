@@ -7,6 +7,8 @@ import type {
   MessagesResponse,
   ResponseContentBlock,
   StopReason,
+  WebSearchResult,
+  WebSearchResultError,
 } from '../../multi-core/src/gateway/messages.ts';
 import { callId, toolName } from '../../multi-core/src/gateway/tools.ts';
 
@@ -37,7 +39,7 @@ export type ResponsesInputItem =
   | { type: 'function_call_output'; call_id: string; output: string | ResponsesInputContent[] }
   | { type: 'reasoning'; id?: string; encrypted_content: string; summary: unknown };
 
-interface ResponsesTool {
+interface ResponsesFunctionTool {
   type: 'function';
   name: string;
   description: string;
@@ -45,7 +47,28 @@ interface ResponsesTool {
   strict: boolean;
 }
 
+/** OpenAI's native, server-executed web search tool. */
+interface ResponsesWebSearchTool {
+  type: 'web_search';
+  filters?: { allowed_domains?: string[]; blocked_domains?: string[] };
+  user_location?: {
+    type: 'approximate';
+    country?: string;
+    city?: string;
+    region?: string;
+  };
+}
+
+type ResponsesTool = ResponsesFunctionTool | ResponsesWebSearchTool;
+
 type ResponsesToolChoice = 'auto' | 'none' | 'required' | { type: 'function'; name?: string };
+
+/** Anthropic server-tool types this gateway translates to an OpenAI native tool. */
+const WEB_SEARCH_TOOL_TYPES = new Set([
+  'web_search_20250305',
+  'web_search_20260209',
+  'web_search_20260318',
+]);
 
 export interface ResponsesRequest {
   model: string;
@@ -77,11 +100,27 @@ interface ResponsesResponse {
   error?: { message?: string };
 }
 
+/** A url_citation annotation on a completed message's output_text. */
+interface ResponsesAnnotation {
+  type: string;
+  url?: string;
+  title?: string;
+  start_index?: number;
+  end_index?: number;
+}
+
 /** Part of a completed `message` output item. */
 interface ResponsesOutputContent {
   type: string;
   text?: string;
   refusal?: string;
+  annotations?: ResponsesAnnotation[];
+}
+
+interface ResponsesWebSearchAction {
+  type: string;
+  query?: string;
+  sources?: { url?: string; title?: string }[];
 }
 
 /** The output items this gateway understands; any other `type` is rejected. */
@@ -89,6 +128,7 @@ type ResponsesOutputItem = (
   | { type: 'message'; content?: ResponsesOutputContent[] }
   | { type: 'function_call'; call_id?: string; name?: string; arguments?: string }
   | { type: 'reasoning'; encrypted_content?: string | null; summary?: unknown }
+  | { type: 'web_search_call'; status?: string; action?: ResponsesWebSearchAction }
 ) & { id?: string };
 
 /** Streamed events the translation acts on. Any other `type` is ignored, exactly
@@ -141,7 +181,7 @@ function isOutputItem(value: unknown, done: boolean): value is ResponsesOutputIt
           (part) =>
             isRecord(part) &&
             (part.type === 'output_text'
-              ? typeof part.text === 'string'
+              ? typeof part.text === 'string' && isAnnotationList(part.annotations)
               : part.type === 'refusal' && typeof part.refusal === 'string'),
         ))
     );
@@ -159,7 +199,40 @@ function isOutputItem(value: unknown, done: boolean): value is ResponsesOutputIt
           )))
     );
   }
+  if (value.type === 'web_search_call') {
+    return (
+      (value.status === undefined || typeof value.status === 'string') &&
+      (value.action === undefined ||
+        (isRecord(value.action) &&
+          typeof value.action.type === 'string' &&
+          (value.action.query === undefined || typeof value.action.query === 'string') &&
+          (value.action.sources === undefined ||
+            (Array.isArray(value.action.sources) &&
+              value.action.sources.every(
+                (source) =>
+                  isRecord(source) &&
+                  (source.url === undefined || typeof source.url === 'string') &&
+                  (source.title === undefined || typeof source.title === 'string'),
+              )))))
+    );
+  }
   return false;
+}
+
+function isAnnotationList(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (Array.isArray(value) &&
+      value.every(
+        (item) =>
+          isRecord(item) &&
+          typeof item.type === 'string' &&
+          (item.url === undefined || typeof item.url === 'string') &&
+          (item.title === undefined || typeof item.title === 'string') &&
+          (item.start_index === undefined || typeof item.start_index === 'number') &&
+          (item.end_index === undefined || typeof item.end_index === 'number'),
+      ))
+  );
 }
 
 function validResponse(value: unknown): boolean {
@@ -429,9 +502,38 @@ function outputFormat(body: MessagesRequest) {
   return format;
 }
 
+function webSearchTool(tool: Record<string, unknown>): ResponsesWebSearchTool {
+  const result: ResponsesWebSearchTool = { type: 'web_search' };
+  const allowed = Array.isArray(tool.allowed_domains)
+    ? tool.allowed_domains.filter((v): v is string => typeof v === 'string')
+    : undefined;
+  const blocked = Array.isArray(tool.blocked_domains)
+    ? tool.blocked_domains.filter((v): v is string => typeof v === 'string')
+    : undefined;
+  if (allowed?.length || blocked?.length) {
+    result.filters = {
+      ...(allowed?.length ? { allowed_domains: allowed } : {}),
+      ...(blocked?.length ? { blocked_domains: blocked } : {}),
+    };
+  }
+  if (isRecord(tool.user_location)) {
+    const loc = tool.user_location;
+    result.user_location = {
+      type: 'approximate',
+      ...(typeof loc.country === 'string' ? { country: loc.country } : {}),
+      ...(typeof loc.city === 'string' ? { city: loc.city } : {}),
+      ...(typeof loc.region === 'string' ? { region: loc.region } : {}),
+    };
+  }
+  return result;
+}
+
 function inputTool(tool: unknown): ResponsesTool {
   if (!isRecord(tool)) {
     throw new Error('Invalid tool');
+  }
+  if (typeof tool.type === 'string' && WEB_SEARCH_TOOL_TYPES.has(tool.type)) {
+    return webSearchTool(tool);
   }
   if (tool.type && tool.type !== 'custom') {
     throw new Error(`Unsupported server tool: ${tool.type}`);
@@ -462,7 +564,8 @@ function toolChoice(
   const name = choice?.name;
   if (
     wanted === 'tool' &&
-    (typeof name !== 'string' || !tools.some((tool) => tool.name === toolName(name)))
+    (typeof name !== 'string' ||
+      !tools.some((tool) => tool.type === 'function' && tool.name === toolName(name)))
   ) {
     throw new Error('Named tool choice must reference a declared tool');
   }
@@ -771,7 +874,48 @@ function outputValue(item: ResponsesOutputItem): unknown {
       // Already emitted signatures retain the completed item snapshot; opaque
       // ciphertext is not a stable identity field for terminal reconciliation.
       return [item.summary ?? []];
+    case 'web_search_call':
+      return [item.status, item.action];
   }
+}
+
+/** OpenAI gives no opaque re-play token for a search result; synthesize one so a
+ *  later turn can round-trip the block without contacting the real Anthropic API. */
+function opaqueToken(payload: unknown): string {
+  return Buffer.from(JSON.stringify(payload)).toString('base64url');
+}
+
+function webSearchResultContent(
+  item: Extract<ResponsesOutputItem, { type: 'web_search_call' }>,
+): WebSearchResult[] | WebSearchResultError {
+  if (item.status === 'failed') {
+    return { type: 'web_search_tool_result_error', error_code: 'unavailable' };
+  }
+  const sources = item.action?.sources ?? [];
+  return sources
+    .filter((source): source is { url: string; title?: string } => typeof source.url === 'string')
+    .map((source) => ({
+      type: 'web_search_result' as const,
+      url: source.url,
+      title: source.title ?? source.url,
+      encrypted_content: opaqueToken({ url: source.url, title: source.title }),
+    }));
+}
+
+function webSearchCitations(annotations: ResponsesAnnotation[] | undefined, text: string) {
+  return annotations
+    ?.filter((annotation) => annotation.type === 'url_citation' && typeof annotation.url === 'string')
+    .map((annotation) => {
+      const start = annotation.start_index ?? 0;
+      const end = annotation.end_index ?? start;
+      return {
+        type: 'web_search_result_location' as const,
+        url: annotation.url ?? '',
+        title: annotation.title ?? annotation.url ?? '',
+        encrypted_index: opaqueToken({ url: annotation.url, start, end }),
+        cited_text: text.slice(start, end).slice(0, 150),
+      };
+    });
 }
 
 export interface ResponseOptions {
@@ -999,7 +1143,7 @@ class ResponseStream {
         throw new Error('OpenAI function arguments changed after streaming');
       }
       slot.arguments = final.arguments;
-    } else if (!slot.text && Array.isArray(final.summary)) {
+    } else if (final.type === 'reasoning' && !slot.text && Array.isArray(final.summary)) {
       slot.text = final.summary.map((part) => (part as { text: string }).text).join('\n');
     }
     slot.item = final;
@@ -1013,6 +1157,9 @@ class ResponseStream {
     }
     if (item.type === 'message') {
       return { type: 'text', text: '' };
+    }
+    if (item.type === 'web_search_call') {
+      throw new Error('web_search_call is emitted directly by drain(), not createBlock');
     }
     if (!item.call_id || !item.name || typeof item.arguments !== 'string') {
       throw new Error('Incomplete function call');
@@ -1091,8 +1238,10 @@ class ResponseStream {
     slot.emitted = limit;
     if (block.type === 'text') {
       block.text = slot.text.slice(0, limit);
-    } else {
+    } else if (block.type === 'thinking') {
       block.thinking = slot.text.slice(0, limit);
+    } else {
+      throw new Error('writeBlock only handles text and thinking blocks');
     }
   }
 
@@ -1109,6 +1258,13 @@ class ResponseStream {
         delta: { type: 'signature_delta', signature: block.signature },
       });
     }
+    if (slot.item.type === 'message' && block.type === 'text') {
+      const part = (slot.item.content ?? []).find((candidate) => candidate.type === 'output_text');
+      const citations = webSearchCitations(part?.annotations, block.text);
+      if (citations?.length) {
+        block.citations = citations;
+      }
+    }
     this.emit('content_block_stop', { index });
   }
 
@@ -1118,8 +1274,13 @@ class ResponseStream {
       if (!slot) {
         return;
       }
-      if (slot.item.type === 'function_call' && !slot.done) {
+      if ((slot.item.type === 'function_call' || slot.item.type === 'web_search_call') && !slot.done) {
         return;
+      }
+      if (slot.item.type === 'web_search_call') {
+        this.emitWebSearch(slot.item);
+        this.cursor++;
+        continue;
       }
       const { block, index } = this.beginBlock(slot);
       this.writeBlock(slot, block, index);
@@ -1129,6 +1290,37 @@ class ResponseStream {
       this.closeBlock(slot, block, index);
       this.cursor++;
     }
+  }
+
+  /** A completed web_search_call has no partial-argument streaming to emit;
+   *  both Claude blocks land fully formed, matching how Anthropic's own API
+   *  only ever hands them back as complete server-tool_use/result pairs. */
+  private emitWebSearch(item: Extract<ResponsesOutputItem, { type: 'web_search_call' }>) {
+    const id = callId(item.id ?? `ws_${this.content.length}`);
+    const useBlock: ResponseContentBlock = {
+      type: 'server_tool_use',
+      id,
+      name: 'web_search',
+      input: { query: item.action?.query ?? '' },
+    };
+    const useIndex = this.content.length;
+    this.content.push(useBlock);
+    this.emit('content_block_start', { index: useIndex, content_block: { ...useBlock, input: {} } });
+    this.emit('content_block_delta', {
+      index: useIndex,
+      delta: { type: 'input_json_delta', partial_json: JSON.stringify(useBlock.input) },
+    });
+    this.emit('content_block_stop', { index: useIndex });
+
+    const resultBlock: ResponseContentBlock = {
+      type: 'web_search_tool_result',
+      tool_use_id: id,
+      content: webSearchResultContent(item),
+    };
+    const resultIndex = this.content.length;
+    this.content.push(resultBlock);
+    this.emit('content_block_start', { index: resultIndex, content_block: resultBlock });
+    this.emit('content_block_stop', { index: resultIndex });
   }
 }
 
