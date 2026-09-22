@@ -376,6 +376,13 @@ export function goPickerOptions(selection: string | undefined): ZenModelOption[]
   if (selection === 'all') {
     return goModelOptions();
   }
+  // "" already selects nothing (the split below yields no ids), but Windows
+  // PowerShell drops an empty-string env var before Node ever sees it, so ""
+  // and unset are indistinguishable there. "none" is a Windows-safe,
+  // non-empty way to ask for the same result.
+  if (selection === 'none') {
+    return [];
+  }
   return [
     ...new Set(
       selection
@@ -396,6 +403,13 @@ export function goPickerOptions(selection: string | undefined): ZenModelOption[]
 export function zenPickerOptions(selection: string | undefined): ZenModelOption[] {
   if (selection === undefined) {
     return zenModelOptions(DEFAULT_ZEN_MODELS);
+  }
+  // "" already selects nothing (the split below yields no ids), but Windows
+  // PowerShell drops an empty-string env var before Node ever sees it, so ""
+  // and unset are indistinguishable there. "none" is a Windows-safe,
+  // non-empty way to ask for the same result.
+  if (selection === 'none') {
+    return [];
   }
   return [
     ...new Set(

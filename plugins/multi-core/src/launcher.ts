@@ -898,6 +898,14 @@ function filterPicker(
   if (selection === 'all') {
     return;
   }
+  // An actual "" selection already hides every row (models below ends up empty),
+  // but Windows PowerShell drops an empty-string env var before it reaches this
+  // process, so "" and unset are indistinguishable there. "none" is a
+  // Windows-safe, non-empty way to ask for the same result.
+  if (selection === 'none') {
+    settings.modelPicker.options = [];
+    return;
+  }
   const additive = selection.startsWith('+');
   const models = [
     ...new Set(
@@ -1010,7 +1018,7 @@ async function handleCommand(command?: string) {
   }
   if (command === '--help') {
     console.log(
-      'Usage: node plugins/multi-core/src/launcher.ts [--cursor-login | --cursor-models | --zen-models | --go-models | --antigravity-models | --antigravity-setup] [-- <claude arguments>]\nLaunch Claude with external models and native coding workers.\n--cursor-login: official Cursor SDK browser sign-in\n--cursor-models: list account model choices and worker names\n--zen-models: list supported Zen models and capabilities\n--go-models: fetch the live OpenCode Go catalog (Go entitlement required)\nMULTI_ANTIGRAVITY=1: enable native Antigravity models and workers\n--antigravity-setup: install the scoped native permission hook\n--antigravity-models: inspect the official Antigravity CLI catalog (native login required)\n--grok-models: list the Grok Build catalog (native login required)\nMULTI_GROK_MODELS: comma-separated Grok model IDs to show, leaving other providers unchanged\nOPENCODE_API_KEY: Zen key (or use OpenCode /connect)\nMULTI_ZEN_MODELS: comma-separated Zen model IDs to show, leaving other providers unchanged\nMULTI_MODELS: comma-separated full model IDs to show in /model (unset: defaults; empty: hide external rows)\nMULTI_CURSOR_EXTRA_MODELS: comma-separated Cursor model IDs to add to Auto, Grok 4.6, and Composer 2.5 in /model',
+      'Usage: node plugins/multi-core/src/launcher.ts [--cursor-login | --cursor-models | --zen-models | --go-models | --antigravity-models | --antigravity-setup] [-- <claude arguments>]\nLaunch Claude with external models and native coding workers.\n--cursor-login: official Cursor SDK browser sign-in\n--cursor-models: list account model choices and worker names\n--zen-models: list supported Zen models and capabilities\n--go-models: fetch the live OpenCode Go catalog (Go entitlement required)\nMULTI_ANTIGRAVITY=1: enable native Antigravity models and workers\n--antigravity-setup: install the scoped native permission hook\n--antigravity-models: inspect the official Antigravity CLI catalog (native login required)\n--grok-models: list the Grok Build catalog (native login required)\nMULTI_GROK_MODELS: comma-separated Grok model IDs to show, leaving other providers unchanged (or "none" to hide Grok entirely)\nOPENCODE_API_KEY: Zen key (or use OpenCode /connect)\nMULTI_ZEN_MODELS: comma-separated Zen model IDs to show, leaving other providers unchanged (or "none" to hide Zen entirely)\nMULTI_GO_MODELS: comma-separated OpenCode Go model IDs, "all" for the full live catalog, or "none" to hide Go entirely (unset: curated default)\nMULTI_MODELS: comma-separated full model IDs to show in /model (unset: defaults; "none" or empty to hide external rows)\nMULTI_CURSOR_EXTRA_MODELS: comma-separated Cursor model IDs to add to Auto, Grok 4.6, and Composer 2.5 in /model\nNote: on Windows PowerShell, $env:VAR="" does not reach this process (the empty value is dropped); use "none" instead of "" for any of the above',
     );
     process.exit(0);
   }
