@@ -34,9 +34,14 @@ import {
   grokPickerOptions,
 } from '../../multi-grok/src/models.ts';
 import { grokPermissionPolicy } from '../../multi-grok/src/permissions.ts';
-import { createOpenAIApproval, discoverOpenAIReviewer } from '../../multi-openai/src/approval.ts';
+import { createOpenAIApproval } from '../../multi-openai/src/approval.ts';
 import { readCodexAuth } from '../../multi-openai/src/auth.ts';
-import { MODELS, OPENAI_WORKERS } from '../../multi-openai/src/models.ts';
+import { refreshOpenAIModels } from '../../multi-openai/src/catalog.ts';
+import {
+  openaiModelOptions,
+  openaiPickerOptions,
+  openaiWorkers,
+} from '../../multi-openai/src/models.ts';
 import type { Effort } from '../../multi-openai/src/responses.ts';
 import { readZenKey } from '../../multi-zen/src/auth.ts';
 import { refreshGoModels } from '../../multi-zen/src/go-catalog.ts';
@@ -605,8 +610,12 @@ async function discoverOpenAI(authFile: string) {
   }
   let openaiReview = false;
   if (codexSignedIn) {
+    // One catalog read answers both questions: which models this account may
+    // select, and whether it has the auto-review model. They came from two
+    // identical requests before the selectable models were discovered here.
     try {
-      openaiReview = await discoverOpenAIReviewer(authFile);
+      const catalog = await refreshOpenAIModels(authFile);
+      openaiReview = catalog.status === 'available' && catalog.reviewer;
     } catch {
       /* Missing capability disables auto mode; inference remains available. */
     }
@@ -645,17 +654,25 @@ export function workerDefinitions(
   grokModels: GrokModel[],
   selectedModels?: readonly string[],
 ) {
+  // Workers are serialized into argv, so they follow the same explicit
+  // MULTI_OPENAI_MODELS selection the picker uses rather than every model the
+  // account happens to offer.
+  const openaiWorkerIds = openaiPickerOptions(process.env.MULTI_OPENAI_MODELS).map(
+    (option) => option.id,
+  );
   const agents: Record<string, AgentDefinition> = Object.fromEntries(
-    Object.entries(codexSignedIn ? OPENAI_WORKERS : {}).map(([name, { model, effort }]) => [
-      name,
-      {
-        description: `${model}, ${effort} reasoning. Native coding, investigation, and review.`,
-        prompt: WORKER_PROMPT,
-        model: `multi/openai/${model}`,
-        tools: ['Read', 'Grep', 'Glob', 'Bash', 'Edit', 'Write'],
-        effort,
-      },
-    ]),
+    Object.entries(codexSignedIn ? openaiWorkers(openaiWorkerIds) : {}).map(
+      ([name, { model, effort }]) => [
+        name,
+        {
+          description: `${model}, ${effort} reasoning. Native coding, investigation, and review.`,
+          prompt: WORKER_PROMPT,
+          model,
+          tools: ['Read', 'Grep', 'Glob', 'Bash', 'Edit', 'Write'],
+          effort,
+        },
+      ],
+    ),
   );
   for (const option of cursorPicker) {
     agents[option.worker] = {
@@ -752,7 +769,7 @@ interface LauncherInvocation {
   viaComSpec?: boolean;
 }
 
-const EFFORT_SUFFIX = /-(minimal|low|medium|high|xhigh|max)$/;
+const EFFORT_SUFFIX = /-(minimal|low|medium|high|xhigh|max|ultra)$/;
 
 /** How far the assembled command line is over the platform's limit, or 0 when
  *  it fits. Windows is the only platform that caps this low enough to matter. */
@@ -1066,9 +1083,22 @@ async function handleCommand(command?: string) {
     console.log(JSON.stringify(result.models, null, 2));
     process.exit(0);
   }
+  if (command === '--openai-models') {
+    const codexAuth = path.join(
+      process.env.CODEX_HOME || path.join(os.homedir(), '.codex'),
+      'auth.json',
+    );
+    const result = await refreshOpenAIModels(codexAuth);
+    if (result.status !== 'available') {
+      console.log(JSON.stringify(result, null, 2));
+      process.exit(1);
+    }
+    console.log(JSON.stringify(result.models, null, 2));
+    process.exit(0);
+  }
   if (command === '--help') {
     console.log(
-      'Usage: node plugins/multi-core/src/launcher.ts [--cursor-login | --cursor-models | --zen-models | --go-models | --antigravity-models | --antigravity-setup] [-- <claude arguments>]\nLaunch Claude with external models and native coding workers.\n--cursor-login: official Cursor SDK browser sign-in\n--cursor-models: list account model choices and worker names\n--zen-models: list supported Zen models and capabilities\n--go-models: fetch the live OpenCode Go catalog (Go entitlement required)\nMULTI_ANTIGRAVITY=1: enable native Antigravity models and workers\n--antigravity-setup: install the scoped native permission hook\n--antigravity-models: inspect the official Antigravity CLI catalog (native login required)\n--grok-models: list the Grok Build catalog (native login required)\nMULTI_GROK_MODELS: comma-separated Grok model IDs to show, leaving other providers unchanged (or "none" to hide Grok entirely)\nOPENCODE_API_KEY: Zen key (or use OpenCode /connect)\nMULTI_ZEN_MODELS: comma-separated Zen model IDs to show, leaving other providers unchanged (or "none" to hide Zen entirely)\nMULTI_GO_MODELS: comma-separated OpenCode Go model IDs, "all" for the full live catalog, or "none" to hide Go entirely (unset: curated default)\nMULTI_MODELS: comma-separated full model IDs to show in /model (unset: defaults; "none" or empty to hide external rows)\nMULTI_CURSOR_EXTRA_MODELS: comma-separated Cursor model IDs to add to Auto, Grok 4.6, and Composer 2.5 in /model\nNote: on Windows PowerShell, $env:VAR="" does not reach this process (the empty value is dropped); use "none" instead of "" for any of the above',
+      'Usage: node plugins/multi-core/src/launcher.ts [--cursor-login | --cursor-models | --zen-models | --go-models | --openai-models | --antigravity-models | --antigravity-setup] [-- <claude arguments>]\nLaunch Claude with external models and native coding workers.\n--cursor-login: official Cursor SDK browser sign-in\n--cursor-models: list account model choices and worker names\n--zen-models: list supported Zen models and capabilities\n--go-models: fetch the live OpenCode Go catalog (Go entitlement required)\n--openai-models: fetch the live Codex catalog for this account (sign-in required)\nMULTI_OPENAI_MODELS: comma-separated Codex model IDs, "all" for every entitled model, or "none" to hide Codex entirely\nMULTI_ANTIGRAVITY=1: enable native Antigravity models and workers\n--antigravity-setup: install the scoped native permission hook\n--antigravity-models: inspect the official Antigravity CLI catalog (native login required)\n--grok-models: list the Grok Build catalog (native login required)\nMULTI_GROK_MODELS: comma-separated Grok model IDs to show, leaving other providers unchanged (or "none" to hide Grok entirely)\nOPENCODE_API_KEY: Zen key (or use OpenCode /connect)\nMULTI_ZEN_MODELS: comma-separated Zen model IDs to show, leaving other providers unchanged (or "none" to hide Zen entirely)\nMULTI_GO_MODELS: comma-separated OpenCode Go model IDs, "all" for the full live catalog, or "none" to hide Go entirely (unset: curated default)\nMULTI_MODELS: comma-separated full model IDs to show in /model (unset: defaults; "none" or empty to hide external rows)\nMULTI_CURSOR_EXTRA_MODELS: comma-separated Cursor model IDs to add to Auto, Grok 4.6, and Composer 2.5 in /model\nNote: on Windows PowerShell, $env:VAR="" does not reach this process (the empty value is dropped); use "none" instead of "" for any of the above',
     );
     process.exit(0);
   }
@@ -1217,12 +1247,14 @@ function pickerSettings(
   const settings: LaunchSettings = {
     modelPicker: {
       options: [
-        ...Object.values(codexSignedIn ? MODELS : {}).map((model) => ({
-          model: `multi/openai/${model}`,
-          label: model,
-          description: 'OpenAI subscription · native Claude Code harness',
-          behavesAs: pickerProfile(true),
-        })),
+        ...(codexSignedIn ? openaiPickerOptions(process.env.MULTI_OPENAI_MODELS) : []).map(
+          (option) => ({
+            model: option.model,
+            label: option.label,
+            description: `${option.description} · OpenAI subscription · ${Math.round(option.contextWindow / 1000)}K context`,
+            behavesAs: pickerProfile(true),
+          }),
+        ),
         ...cursorPicker.map(({ model, label, description, catalog }) => ({
           model,
           label,

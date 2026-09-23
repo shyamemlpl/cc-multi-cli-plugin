@@ -615,7 +615,7 @@ test('worker registration follows selected models and retains their effort alias
   const agents = workerDefinitions(true, [], true, [], [], selected);
   assert.deepEqual(new Set(Object.values(agents).map((worker) => worker.model)), new Set(selected));
   assert.equal(Object.keys(agents).length, 12);
-  assert.equal(agents['openai-luna-high'].effort, 'high');
+  assert.equal(agents['openai-5.6-luna-high'].effort, 'high');
   assert.equal(agents['zen-gpt-5.6-sol-max'].effort, 'max');
   assert.deepEqual(workerDefinitions(true, [], true, [], [], []), {});
 });

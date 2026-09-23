@@ -20,7 +20,7 @@ import { type GrokHarness, GrokProviderError } from '../../../multi-grok/src/har
 import { formatGrokQuota, readGrokAuth } from '../../../multi-grok/src/usage.ts';
 import { CodexAuthError, codexRequest } from '../../../multi-openai/src/auth.ts';
 import { openaiInstructions } from '../../../multi-openai/src/instructions.ts';
-import { MODELS } from '../../../multi-openai/src/models.ts';
+import { openaiModels } from '../../../multi-openai/src/models.ts';
 import type { ResponsesRequest } from '../../../multi-openai/src/responses.ts';
 import { forAnthropic, fromResponses, toResponses } from '../../../multi-openai/src/responses.ts';
 import { readCodexUsage } from '../../../multi-openai/src/usage.ts';
@@ -1074,9 +1074,20 @@ function prepareZenRequest(exchange: ProviderRequest, fallbackSession: string) {
 function openaiRequest(exchange: ProviderRequest, externalModel: string): ResponsesRequest {
   const { req, body, url } = exchange;
   try {
-    const model = Object.values(MODELS).find((model) => externalModel === `multi/openai/${model}`);
-    if (!model) {
+    // Resolve against the discovered catalog so a model the account gained
+    // since this build shipped still routes; the static list remains the
+    // fallback for a signed-out or offline launch.
+    const entry = openaiModels().find((known) => externalModel === `multi/openai/${known.id}`);
+    if (!entry) {
       throw new Error('Unknown native OpenAI model');
+    }
+    const model = entry.id;
+    // Reasoning levels are per-model: `ultra` exists on the GPT-6 family and on
+    // gpt-5.6-sol/terra, but not on the luna models or gpt-5.5. Rejecting here
+    // keeps an unsupported level a local 400 instead of an upstream failure.
+    const effort = body.output_config?.effort;
+    if (effort !== undefined && !entry.efforts.some((level) => level === effort)) {
+      throw new Error(`${model} does not support effort ${effort}`);
     }
     if (
       !['/v1/messages', '/v1/messages/count_tokens'].includes(url.pathname) ||

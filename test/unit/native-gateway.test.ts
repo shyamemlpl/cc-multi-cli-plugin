@@ -863,15 +863,20 @@ test('all registered model and reasoning choices reach OpenAI without substituti
     assert.equal(request.reasoning.effort, effort);
     return new Response(sse(textEvents));
   });
+  // Without a discovered catalog these are the static fallback's models, named
+  // by generation so a second `sol` or `luna` can never be ambiguous.
   for (const [name, slug] of [
-    ['openai-native', 'gpt-6-astra'],
-    ['openai-sol', 'gpt-5.6-sol'],
-    ['openai-terra', 'gpt-5.6-terra'],
-    ['openai-luna', 'gpt-5.6-luna'],
+    ['openai-6-astra', 'gpt-6-astra'],
+    ['openai-5.6-sol', 'gpt-5.6-sol'],
+    ['openai-5.6-terra', 'gpt-5.6-terra'],
+    ['openai-5.6-luna', 'gpt-5.6-luna'],
   ]) {
-    assert.deepEqual(OPENAI_WORKERS[name], { model: slug, effort: 'medium' });
+    assert.deepEqual(OPENAI_WORKERS[name], { model: `multi/openai/${slug}`, effort: 'medium' });
     for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
-      assert.deepEqual(OPENAI_WORKERS[`${name}-${effort}`], { model: slug, effort });
+      assert.deepEqual(OPENAI_WORKERS[`${name}-${effort}`], {
+        model: `multi/openai/${slug}`,
+        effort,
+      });
       const response = await call(
         { ...body, model: `multi/openai/${slug}`, output_config: { effort } },
         { 'x-claude-code-agent-id': `${slug}:${effort}` },

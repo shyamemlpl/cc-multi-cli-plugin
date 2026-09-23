@@ -20,7 +20,10 @@ const IMAGE_MEDIA_TYPES: readonly unknown[] = [
   'image/gif',
   'image/webp',
 ];
-const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+// `ultra` is advertised by the GPT-6 family and by gpt-5.6-sol/terra; models
+// that do not support it say so in their own catalog entry, so the per-model
+// effort list from discovery is what gates it, not this union.
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
 
 export type Effort = (typeof EFFORTS)[number];
 
