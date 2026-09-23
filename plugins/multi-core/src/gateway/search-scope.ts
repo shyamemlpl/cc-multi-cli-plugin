@@ -20,3 +20,30 @@ export function stripSearchToolsForNonGo(body: MessagesRequest): MessagesRequest
   }
   return { ...body, tools: body.tools.filter((tool) => !tool.name?.startsWith(SEARCH_TOOL_PREFIX)) };
 }
+
+/**
+ * The tool surface a named Go worker gets, per its explicit `tools:` list in
+ * launcher.ts. Delegating to a worker builds a request with only these tools
+ * from the start; selecting a Go model directly with /model does not -- the
+ * top-level session carries Claude Code's full built-in set, discovered
+ * progressively via ToolSearch. Some of those schemas are not valid under the
+ * JSON Schema subset Zen's backend accepts (confirmed live: Artifact's,
+ * `"is not valid under any of the schemas listed in the 'anyOf' keyword"`,
+ * a 400 that names no culprit and is easy to mistake for a tool-count limit).
+ * Restricting every Go-bound request to this same surface, not only worker
+ * requests, is what makes /model and delegation behave identically.
+ */
+const GO_TOOL_ALLOWLIST = new Set(['Read', 'Grep', 'Glob', 'Bash', 'Edit', 'Write']);
+
+/** Keep only the tools a Go request can actually use: the curated built-ins
+ *  above, plus the web-search MCP tools (which stripSearchToolsForNonGo would
+ *  otherwise be the only thing gating). Returns the same object when nothing
+ *  would change, so a request already this shape pays no allocation. */
+export function restrictToolsForGo(body: MessagesRequest): MessagesRequest {
+  const keep = (name: string | undefined) =>
+    !!name && (GO_TOOL_ALLOWLIST.has(name) || name.startsWith(SEARCH_TOOL_PREFIX));
+  if (!body.tools?.some((tool) => !keep(tool.name))) {
+    return body;
+  }
+  return { ...body, tools: body.tools.filter((tool) => keep(tool.name)) };
+}

@@ -1,5 +1,8 @@
 import type { MessagesRequest } from '../../multi-core/src/gateway/messages.ts';
-import { stripSearchToolsForNonGo } from '../../multi-core/src/gateway/search-scope.ts';
+import {
+  restrictToolsForGo,
+  stripSearchToolsForNonGo,
+} from '../../multi-core/src/gateway/search-scope.ts';
 import { estimateInputTokens, estimateTextTokens } from '../../multi-core/src/gateway/tokens.ts';
 import type { ResponsesInputContent, ResponsesRequest } from '../../multi-openai/src/responses.ts';
 import { toResponses } from '../../multi-openai/src/responses.ts';
@@ -50,8 +53,13 @@ export function zenRequest(body: MessagesRequest, cacheKey: string) {
     throw new Error(`Zen max_tokens must be between 1 and ${model.maxOutputTokens}`);
   }
   // Only OpenCode Go's chat-protocol models lack a native search tool; every
-  // other Zen model keeps its regular tool list untouched (see search-scope.ts).
-  const scopedBody = isGo ? body : stripSearchToolsForNonGo(body);
+  // other Zen model keeps its regular tool list untouched. Go additionally
+  // gets its whole tool surface restricted to a curated allowlist, which is
+  // what a named Go worker already gets from its explicit tools: list -- doing
+  // the same here makes /model behave identically to worker delegation rather
+  // than inheriting Claude Code's full built-in set, some of which Zen's
+  // backend rejects outright (see search-scope.ts).
+  const scopedBody = isGo ? restrictToolsForGo(body) : stripSearchToolsForNonGo(body);
   const signaturePrefix = `multi-zen-responses:${model.id}:`;
   const normalized = toResponses(scopedBody, model.id, signaturePrefix);
   validateMedia(normalized, model);
