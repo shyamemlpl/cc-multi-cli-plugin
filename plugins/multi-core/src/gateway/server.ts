@@ -40,6 +40,7 @@ import type { PermissionContext, PermissionModes } from './mode-hook.ts';
 import type { PendingApprovalTool } from './permission-hook.ts';
 import { codexQuotaView, ProviderUsageDashboard } from './provider-usage.ts';
 import { ReceiptLedger } from './receipts.ts';
+import { stripSearchToolsForNonGo } from './search-scope.ts';
 import { estimateInputTokens } from './tokens.ts';
 import { forwardObservedTools, ToolObserver } from './tool-observer.ts';
 import { originalToolNames } from './tools.ts';
@@ -1095,7 +1096,7 @@ function openaiRequest(exchange: ProviderRequest, externalModel: string): Respon
     ) {
       throw new Error('External models require POST /v1/messages or /v1/messages/count_tokens');
     }
-    const request = toResponses(body, model);
+    const request = toResponses(stripSearchToolsForNonGo(body), model);
     return { ...request, instructions: openaiInstructions(request.instructions) };
   } catch (error) {
     throw new BadRequest(reason(error));

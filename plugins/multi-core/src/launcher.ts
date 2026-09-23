@@ -714,7 +714,18 @@ export function workerDefinitions(
       description: `OpenCode Go ${option.model}${option.effort ? `, ${option.effort} effort` : ''}. Uses native Claude Code tools.`,
       prompt: WORKER_PROMPT,
       model: option.model,
-      tools: ['Read', 'Grep', 'Glob', 'Bash', 'Edit', 'Write'],
+      // Only OpenCode Go's chat-protocol models have no native search of their
+      // own (Claude, Codex, and Antigravity's Gemini models each have a better
+      // one on their own infrastructure -- see search-scope.ts), so only Go
+      // workers get the web-search MCP tool added to their explicit list. An
+      // agent's declared tool list is what actually reaches the model here;
+      // Claude's own deferred-tool discovery does not reliably surface an MCP
+      // tool to a non-Anthropic model at all (confirmed live), and forcing it
+      // off session-wide instead floods every request with every configured
+      // MCP server's tools plus Claude Code's full built-in set -- confirmed
+      // live at 50 tools in one call, some of them with schemas (Artifact's
+      // among them) this provider's backend rejects outright.
+      tools: ['Read', 'Grep', 'Glob', 'Bash', 'Edit', 'Write', 'mcp__web-search__web_search', 'mcp__web-search__web_fetch'],
       ...(option.effort ? { effort: option.effort } : {}),
     };
   }
@@ -1331,13 +1342,15 @@ function gatewayEnvironment(port: number, token: string, anthropic: boolean, cur
     // API timer; preserve explicit user limits.
     API_TIMEOUT_MS: process.env.API_TIMEOUT_MS ?? '2147483647',
     ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`,
-    // Claude Code only recognizes 'true'/'false' here; a custom ANTHROPIC_BASE_URL
-    // (this gateway) documents tool search as off by default, but empirically the
-    // model still receives tool definitions flagged defer_loading and never
-    // discovers them on its own -- verified live: OpenCode Go and Codex models
-    // could not see an MCP tool until this was forced to 'false'. Scoped to this
-    // child process only, so it never affects a plain `claude` session elsewhere.
-    ENABLE_TOOL_SEARCH: process.env.ENABLE_TOOL_SEARCH ?? 'false',
+    // A custom base URL disables Claude's on-demand tool loading unless opted in.
+    // We forward Claude tool references; preserve an explicit user preference.
+    // Forcing this to 'false' was tried and reverted: it stops every tool from
+    // deferring, not just the ones that need it, so a session with several MCP
+    // servers configured sent all of their schemas plus every Claude Code
+    // built-in on every request -- confirmed live at 50 tools in one call,
+    // which some providers reject outright. See direct-tools.ts instead, which
+    // names the specific tools that must bypass deferral.
+    ENABLE_TOOL_SEARCH: process.env.ENABLE_TOOL_SEARCH ?? 'auto',
     MULTI_GATEWAY_TOKEN: token,
     MULTI_CURSOR_DISPLAY_TOOLS: cursor ? '1' : '0',
     CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: '1',

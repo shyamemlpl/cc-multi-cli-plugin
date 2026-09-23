@@ -1,4 +1,5 @@
 import type { MessagesRequest } from '../../multi-core/src/gateway/messages.ts';
+import { stripSearchToolsForNonGo } from '../../multi-core/src/gateway/search-scope.ts';
 import { estimateInputTokens, estimateTextTokens } from '../../multi-core/src/gateway/tokens.ts';
 import type { ResponsesInputContent, ResponsesRequest } from '../../multi-openai/src/responses.ts';
 import { toResponses } from '../../multi-openai/src/responses.ts';
@@ -48,8 +49,11 @@ export function zenRequest(body: MessagesRequest, cacheKey: string) {
   ) {
     throw new Error(`Zen max_tokens must be between 1 and ${model.maxOutputTokens}`);
   }
+  // Only OpenCode Go's chat-protocol models lack a native search tool; every
+  // other Zen model keeps its regular tool list untouched (see search-scope.ts).
+  const scopedBody = isGo ? body : stripSearchToolsForNonGo(body);
   const signaturePrefix = `multi-zen-responses:${model.id}:`;
-  const normalized = toResponses(body, model.id, signaturePrefix);
+  const normalized = toResponses(scopedBody, model.id, signaturePrefix);
   validateMedia(normalized, model);
   const effort = body.output_config?.effort;
   if (effort !== undefined && model.efforts && !model.efforts.some((value) => value === effort)) {
@@ -61,7 +65,7 @@ export function zenRequest(body: MessagesRequest, cacheKey: string) {
   if (model.protocol === 'chat') {
     // Claude supplies an effort even for models with no adjustable effort. These
     // catalog entries explicitly use native reasoning, with no effort presets.
-    const chat = toChat({ ...body, max_tokens: body.max_tokens ?? 32000 }, model.id);
+    const chat = toChat({ ...scopedBody, max_tokens: body.max_tokens ?? 32000 }, model.id);
     const reasoningTokens = chat.messages.reduce(
       (total, message) =>
         total +

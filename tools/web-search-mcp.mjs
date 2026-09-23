@@ -24,6 +24,8 @@ import { createInterface } from 'node:readline';
 const PROTOCOL_VERSION = '2024-11-05';
 const DEFAULT_TIMEOUT_MS = Number(process.env.MULTI_SEARCH_TIMEOUT_MS || 30000);
 const DEFAULT_MAX_RESULTS = 5;
+const DEFAULT_FETCH_MAX_CHARS = 8000;
+const MAX_FETCH_BYTES = 10 * 1024 * 1024;
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -160,6 +162,77 @@ function claudeSearch(query) {
   });
 }
 
+/** Strip an HTML document to readable text: no rendering, no link extraction,
+ *  just enough to let a model read the substance of a page it found via
+ *  search. Deliberately dependency-free rather than pulling in a DOM parser. */
+function htmlToText(html) {
+  return html
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<(script|style|noscript|template)\b[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|li|tr|h[1-6])>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n[ \t]*\n[ \t]*\n+/g, '\n\n')
+    .trim();
+}
+
+async function fetchUrl(rawUrl, maxChars) {
+  let url;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error(`Not a valid URL: ${rawUrl}`);
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`Unsupported URL scheme: ${url.protocol}`);
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: { 'user-agent': 'Mozilla/5.0 (compatible; multi-web-fetch/1.0)' },
+    });
+    if (!response.ok) {
+      throw new Error(`Fetch failed: HTTP ${response.status}`);
+    }
+    const contentType = response.headers.get('content-type') ?? '';
+    const contentLength = Number(response.headers.get('content-length') ?? 0);
+    if (contentLength > MAX_FETCH_BYTES) {
+      throw new Error(`Page too large (${contentLength} bytes)`);
+    }
+    if (!/text\/|application\/(json|xml|javascript)/.test(contentType)) {
+      throw new Error(`Unsupported content type: ${contentType || 'unknown'}`);
+    }
+    const body = await response.text();
+    const text = /text\/html/.test(contentType) ? htmlToText(body) : body.trim();
+    const truncated = text.length > maxChars;
+    const clipped = truncated ? `${text.slice(0, maxChars)}\n\n[truncated]` : text;
+    return `Fetched ${url.href} (${response.status})\n\n${clipped || '[empty page]'}`;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function runFetch(args) {
+  const url = typeof args?.url === 'string' ? args.url.trim() : '';
+  if (!url) {
+    throw new Error('url is required');
+  }
+  const maxChars = Number.isInteger(args?.max_chars)
+    ? Math.min(Math.max(args.max_chars, 500), 50000)
+    : DEFAULT_FETCH_MAX_CHARS;
+  return fetchUrl(url, maxChars);
+}
+
 async function runSearch(args) {
   const query = typeof args?.query === 'string' ? args.query.trim() : '';
   if (!query) {
@@ -189,6 +262,23 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'web_fetch',
+    description:
+      'Fetch a URL and return its readable text content. Use after web_search to read a specific page in full, beyond the search snippet.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'The URL to fetch. Must be http or https.' },
+        max_chars: {
+          type: 'integer',
+          description: `Maximum characters to return (default ${DEFAULT_FETCH_MAX_CHARS}, max 50000).`,
+        },
+      },
+      required: ['url'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 async function handle(request) {
@@ -202,11 +292,14 @@ async function handle(request) {
     case 'tools/list':
       return { tools: TOOLS };
     case 'tools/call': {
-      if (request.params?.name !== 'web_search') {
-        throw new Error(`Unknown tool: ${request.params?.name}`);
+      const toolName = request.params?.name;
+      if (toolName === 'web_search') {
+        return { content: [{ type: 'text', text: await runSearch(request.params?.arguments) }] };
       }
-      const text = await runSearch(request.params?.arguments);
-      return { content: [{ type: 'text', text }] };
+      if (toolName === 'web_fetch') {
+        return { content: [{ type: 'text', text: await runFetch(request.params?.arguments) }] };
+      }
+      throw new Error(`Unknown tool: ${toolName}`);
     }
     case 'ping':
       return {};
@@ -241,7 +334,7 @@ input.on('line', (line) => {
           jsonrpc: '2.0',
           id: request.id,
           result: {
-            content: [{ type: 'text', text: `Search failed: ${error.message}` }],
+            content: [{ type: 'text', text: `${request.params?.name} failed: ${error.message}` }],
             isError: true,
           },
         });
