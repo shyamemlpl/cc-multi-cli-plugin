@@ -683,10 +683,10 @@ export function workerDefinitions(
       ...(option.effort ? { effort: option.effort } : {}),
     };
   }
-  // Keep worker registration in lockstep with the picker's own Go selection
-  // (see pickerSettings): both must agree on which ids are "in", and neither
-  // may silently default to the full live catalog on Windows (see
-  // DEFAULT_GO_MODELS in models.ts for why).
+  // Named workers, unlike picker rows, are serialized into the command line,
+  // so they stay on the curated default even though the picker offers every
+  // live Go model (see pickerSettings). Selecting an unworkered Go model in
+  // /model still routes fine; only delegation to a named worker needs one.
   const goWorkerIds = goPickerOptions(process.env.MULTI_GO_MODELS).map((option) => option.id);
   for (const [name, option] of Object.entries(zen ? goWorkers(goWorkerIds) : {})) {
     agents[name] = {
@@ -1195,12 +1195,16 @@ function pickerSettings(
   // "kimi-k3", can legitimately exist in both catalogs), so it uses its own
   // MULTI_GO_MODELS selection rather than reusing MULTI_ZEN_MODELS: an id
   // meant for one would misresolve or wrongly throw against the other's own
-  // picker. It defaults to a small curated subset, not the full 30+ model
-  // live catalog — see DEFAULT_GO_MODELS for why (Windows argument limit).
+  // picker.
+  //
+  // The picker reaches Claude as a settings *file*, so rows cost nothing
+  // against the Windows command-line limit that bounds named workers. Every
+  // live-discovered Go model is therefore selectable by default, and routing
+  // resolves against the same live catalog; only goWorkers() stays curated.
   let goOptions = goPickerOptions('');
   if (zen) {
     zenOptions = fullCatalog ? zenModelOptions() : zenPickerOptions(process.env.MULTI_ZEN_MODELS);
-    goOptions = fullCatalog ? goModelOptions() : goPickerOptions(process.env.MULTI_GO_MODELS);
+    goOptions = goPickerOptions(process.env.MULTI_GO_MODELS ?? 'all');
   }
   const settings: LaunchSettings = {
     modelPicker: {
