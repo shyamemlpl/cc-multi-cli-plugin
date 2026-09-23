@@ -100,15 +100,28 @@ export function openaiPickerOptions(selection: string | undefined): OpenAIModelO
   });
 }
 
+/**
+ * Efforts Claude Code's own `--agents` schema accepts. OpenAI advertises
+ * `ultra` on the GPT-6 family, but Claude Code rejects an agent declaring it
+ * ("effort: Invalid input") and refuses to start, so `ultra` stays reachable
+ * through /effort on the request and never becomes a named worker.
+ */
+const WORKER_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+function registrableEffort(effort: Effort): boolean {
+  return WORKER_EFFORTS.some((known) => known === effort);
+}
+
 function workerEntries(models: readonly OpenAIModel[]): [string, Worker][] {
   return models.flatMap((model) => {
     const name = openaiWorkerName(model.id);
     const route = openaiRoute(model.id);
+    const base = registrableEffort(model.defaultEffort) ? model.defaultEffort : 'medium';
     return [
-      [name, { model: route, effort: model.defaultEffort }] as [string, Worker],
-      ...model.efforts.map(
-        (effort) => [`${name}-${effort}`, { model: route, effort }] as [string, Worker],
-      ),
+      [name, { model: route, effort: base }] as [string, Worker],
+      ...model.efforts
+        .filter(registrableEffort)
+        .map((effort) => [`${name}-${effort}`, { model: route, effort }] as [string, Worker]),
     ];
   });
 }
