@@ -779,9 +779,17 @@ export function dropEffortVariants(agents: Record<string, AgentDefinition>): str
   const dropped: string[] = [];
   for (const name of Object.keys(agents)) {
     const base = name.replace(EFFORT_SUFFIX, '');
-    // Only a worker whose unsuffixed sibling serves the same model is a variant;
-    // a model whose own id merely ends in an effort word keeps its row.
-    if (base !== name && agents[base]?.model === agents[name].model) {
+    const sibling = agents[base];
+    if (base === name || !sibling) {
+      // No unsuffixed sibling to fall back on, so this row is the only way to
+      // reach its model — a model whose own id merely ends in an effort word.
+      continue;
+    }
+    // OpenAI and Zen spell a variant as the same model at another effort.
+    // Antigravity advertises each level as its own model id, so the sibling's
+    // model differs; its declared effort is what marks it reachable via /effort
+    // from the base row the picker groups it under.
+    if (sibling.model === agents[name].model || agents[name].effort !== undefined) {
       delete agents[name];
       dropped.push(name);
     }

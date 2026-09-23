@@ -721,10 +721,30 @@ test('effort variants are shed to fit the command line, keeping one worker per m
       prompt: '',
       tools: ['Read'],
     },
+    // Antigravity advertises each reasoning level as its own model id, so the
+    // base row's model differs; the declared effort marks it /effort-reachable.
+    'antigravity-gemini-3.8-flash': {
+      model: 'multi/antigravity/gemini-3.8-flash',
+      description: '',
+      prompt: '',
+      tools: ['Read'],
+    },
+    'antigravity-gemini-3.8-flash-high': {
+      model: 'multi/antigravity/gemini-3.8-flash-high',
+      description: '',
+      prompt: '',
+      tools: ['Read'],
+      effort: 'high' as const,
+    },
   };
   const dropped = dropEffortVariants(agents);
-  assert.deepEqual(dropped.sort(), ['openai-luna-high', 'openai-luna-low']);
+  assert.deepEqual(dropped.sort(), [
+    'antigravity-gemini-3.8-flash-high',
+    'openai-luna-high',
+    'openai-luna-low',
+  ]);
   assert.deepEqual(Object.keys(agents).sort(), [
+    'antigravity-gemini-3.8-flash',
     'openai-luna',
     'zen-go-grok-4.7-max',
     'zen-go-kimi-k3',
