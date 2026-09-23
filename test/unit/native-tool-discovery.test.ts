@@ -3,6 +3,13 @@ import test from 'node:test';
 import { toResponses } from '../../plugins/multi-openai/src/responses.ts';
 import { toChat } from '../../plugins/multi-zen/src/chat.ts';
 
+/** Every tool built from these fixtures is a declared function tool; narrow for the assertions. */
+const functionToolName = (tool: { type: string; name?: string }): string => {
+  assert.equal(tool.type, 'function');
+  assert(typeof tool.name === 'string');
+  return tool.name;
+};
+
 const body = {
   model: 'multi/openai/gpt-5.6-luna',
   messages: [
@@ -38,12 +45,12 @@ test('OpenAI omits deferred declarations and preserves loaded tools and referenc
     body.model,
   );
   assert.deepEqual(
-    initialRequest.tools.map((tool) => tool.name),
+    initialRequest.tools.map(functionToolName),
     ['Read'],
   );
   const request = toResponses(body, body.model);
   assert.deepEqual(
-    request.tools.map((tool) => tool.name),
+    request.tools.map(functionToolName),
     ['mcp__search', 'Read'],
   );
   const output = request.input.at(-1);
@@ -75,7 +82,7 @@ test('named tool choices retain the requested deferred declaration', () => {
     body.model,
   );
   assert.deepEqual(
-    request.tools.map((tool) => tool.name),
+    request.tools.map(functionToolName),
     ['mcp__search', 'Read'],
   );
 });

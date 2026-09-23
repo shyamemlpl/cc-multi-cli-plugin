@@ -34,16 +34,25 @@ import {
   grokPickerOptions,
 } from '../../multi-grok/src/models.ts';
 import { grokPermissionPolicy } from '../../multi-grok/src/permissions.ts';
-import { createOpenAIApproval, discoverOpenAIReviewer } from '../../multi-openai/src/approval.ts';
+import { createOpenAIApproval } from '../../multi-openai/src/approval.ts';
 import { readCodexAuth } from '../../multi-openai/src/auth.ts';
-import { MODELS, OPENAI_WORKERS } from '../../multi-openai/src/models.ts';
+import { refreshOpenAIModels } from '../../multi-openai/src/catalog.ts';
+import {
+  openaiModelOptions,
+  openaiPickerOptions,
+  openaiWorkers,
+} from '../../multi-openai/src/models.ts';
 import type { Effort } from '../../multi-openai/src/responses.ts';
 import { readZenKey } from '../../multi-zen/src/auth.ts';
+import { refreshGoModels } from '../../multi-zen/src/go-catalog.ts';
 import {
+  goModelOptions,
+  goPickerOptions,
+  goWorkers,
   ZEN_MODELS,
-  ZEN_WORKERS,
   zenModelOptions,
   zenPickerOptions,
+  zenWorkers,
 } from '../../multi-zen/src/models.ts';
 import { AgentCatalog } from './gateway/agent-catalog.ts';
 import {
@@ -120,6 +129,12 @@ async function main() {
   );
   const { codexSignedIn, openaiReview } = await discoverOpenAI(authFile);
   const zenKey = providerEnabled('zen') ? await readZenKey() : undefined;
+  // Go shares Zen's account and key but is a separately entitled catalog:
+  // an unentitled key just leaves the cache empty, same as a disconnected
+  // provider, rather than failing startup.
+  if (zenKey) {
+    await refreshGoModels({ apiKey: zenKey });
+  }
   const antigravityModels = await discoverAntigravity();
   const grokModels = await discoverGrok();
   const token = randomBytes(32).toString('hex');
@@ -226,25 +241,33 @@ async function main() {
   }
   configureApproval(settings, approvalProviders, selectedModel, { antigravity, grok }, anthropic);
   await writeFile(settingsFile, JSON.stringify(settings), { mode: 0o600 });
-  const definitions = JSON.stringify(agents);
   const childEnvironment = gatewayEnvironment(address.port, token, anthropic, Boolean(cursor));
   const claudePath = resolveExecutable('claude', {
     configuredPath: claudeExecutable,
     env: childEnvironment,
   });
-  const childArguments = launcherArguments(
-    args,
-    settingsFile,
-    definitions,
-    pluginInventory,
-    pluginRoot,
-  );
-  const childInvocation = executableInvocation(
-    claudePath,
-    childArguments,
-    process.platform,
-    childEnvironment,
-  );
+  const buildInvocation = () =>
+    executableInvocation(
+      claudePath,
+      launcherArguments(args, settingsFile, JSON.stringify(agents), pluginInventory, pluginRoot),
+      process.platform,
+      childEnvironment,
+    );
+  let childInvocation = buildInvocation();
+  // Windows caps a cmd.exe command line at 8,000 characters, and every enabled
+  // provider's workers share that one budget. Rather than refusing to start and
+  // leaving the user to hand-tune three env vars, shed the effort variants
+  // first: they are the multiplicative part of the set, and /effort still
+  // reaches the same reasoning levels on the base worker.
+  if (argumentLimitOverrun(childInvocation, process.platform) > 0) {
+    const dropped = dropEffortVariants(agents);
+    if (dropped.length) {
+      childInvocation = buildInvocation();
+      console.error(
+        `Native gateway: dropped ${dropped.length} effort-variant workers to fit the Windows command-line limit. The base worker for each model is still registered; use /effort to change reasoning level.`,
+      );
+    }
+  }
   try {
     checkLauncherArgumentLimit(agents, childInvocation, claudePath, process.platform);
   } catch (error) {
@@ -587,8 +610,12 @@ async function discoverOpenAI(authFile: string) {
   }
   let openaiReview = false;
   if (codexSignedIn) {
+    // One catalog read answers both questions: which models this account may
+    // select, and whether it has the auto-review model. They came from two
+    // identical requests before the selectable models were discovered here.
     try {
-      openaiReview = await discoverOpenAIReviewer(authFile);
+      const catalog = await refreshOpenAIModels(authFile);
+      openaiReview = catalog.status === 'available' && catalog.reviewer;
     } catch {
       /* Missing capability disables auto mode; inference remains available. */
     }
@@ -627,17 +654,25 @@ export function workerDefinitions(
   grokModels: GrokModel[],
   selectedModels?: readonly string[],
 ) {
+  // Workers are serialized into argv, so they follow the same explicit
+  // MULTI_OPENAI_MODELS selection the picker uses rather than every model the
+  // account happens to offer.
+  const openaiWorkerIds = openaiPickerOptions(process.env.MULTI_OPENAI_MODELS).map(
+    (option) => option.id,
+  );
   const agents: Record<string, AgentDefinition> = Object.fromEntries(
-    Object.entries(codexSignedIn ? OPENAI_WORKERS : {}).map(([name, { model, effort }]) => [
-      name,
-      {
-        description: `${model}, ${effort} reasoning. Native coding, investigation, and review.`,
-        prompt: WORKER_PROMPT,
-        model: `multi/openai/${model}`,
-        tools: ['Read', 'Grep', 'Glob', 'Bash', 'Edit', 'Write'],
-        effort,
-      },
-    ]),
+    Object.entries(codexSignedIn ? openaiWorkers(openaiWorkerIds) : {}).map(
+      ([name, { model, effort }]) => [
+        name,
+        {
+          description: `${model}, ${effort} reasoning. Native coding, investigation, and review.`,
+          prompt: WORKER_PROMPT,
+          model,
+          tools: ['Read', 'Grep', 'Glob', 'Bash', 'Edit', 'Write'],
+          effort,
+        },
+      ],
+    ),
   );
   for (const option of cursorPicker) {
     agents[option.worker] = {
@@ -647,12 +682,50 @@ export function workerDefinitions(
       tools: ['Read', 'Grep', 'Glob', 'Bash', 'Edit', 'Write'],
     };
   }
-  for (const [name, option] of Object.entries(zen ? ZEN_WORKERS : {})) {
+  // Registering every Zen model unconditionally used to ignore MULTI_ZEN_MODELS
+  // entirely, so an account with no Zen entitlement (e.g. OpenCode Go-only)
+  // still paid the full catalog's Windows cmd.exe argument cost with no way to
+  // shrink it. Leaving MULTI_ZEN_MODELS unset keeps the historical full-catalog
+  // default; setting it (including to "") narrows workers to match the picker.
+  const zenWorkerIds =
+    process.env.MULTI_ZEN_MODELS === undefined
+      ? undefined
+      : zenPickerOptions(process.env.MULTI_ZEN_MODELS).map((option) => option.id);
+  for (const [name, option] of Object.entries(zen ? zenWorkers(zenWorkerIds) : {})) {
     agents[name] = {
       description: `OpenCode Zen ${option.model}${option.effort ? `, ${option.effort} effort` : ''}. Uses native Claude Code tools.`,
       prompt: WORKER_PROMPT,
       model: option.model,
       tools: ['Read', 'Grep', 'Glob', 'Bash', 'Edit', 'Write'],
+      ...(option.effort ? { effort: option.effort } : {}),
+    };
+  }
+  // Workers track the picker exactly: every model selectable in /model can also
+  // be delegated to by name. Spawning the real executable rather than a cmd.exe
+  // shim (see executableInvocation) leaves 32,000 characters for the whole
+  // command line, which the full catalog fits inside; a setup that still falls
+  // back to cmd.exe sheds effort variants first and names MULTI_GO_MODELS if
+  // that is not enough.
+  const goWorkerIds = goPickerOptions(process.env.MULTI_GO_MODELS ?? 'all').map(
+    (option) => option.id,
+  );
+  for (const [name, option] of Object.entries(zen ? goWorkers(goWorkerIds) : {})) {
+    agents[name] = {
+      description: `OpenCode Go ${option.model}${option.effort ? `, ${option.effort} effort` : ''}. Uses native Claude Code tools.`,
+      prompt: WORKER_PROMPT,
+      model: option.model,
+      // Only OpenCode Go's chat-protocol models have no native search of their
+      // own (Claude, Codex, and Antigravity's Gemini models each have a better
+      // one on their own infrastructure -- see search-scope.ts), so only Go
+      // workers get the web-search MCP tool added to their explicit list. An
+      // agent's declared tool list is what actually reaches the model here;
+      // Claude's own deferred-tool discovery does not reliably surface an MCP
+      // tool to a non-Anthropic model at all (confirmed live), and forcing it
+      // off session-wide instead floods every request with every configured
+      // MCP server's tools plus Claude Code's full built-in set -- confirmed
+      // live at 50 tools in one call, some of them with schemas (Artifact's
+      // among them) this provider's backend rejects outright.
+      tools: ['Read', 'Grep', 'Glob', 'Bash', 'Edit', 'Write', 'mcp__web-search__web_search', 'mcp__web-search__web_fetch'],
       ...(option.effort ? { effort: option.effort } : {}),
     };
   }
@@ -711,21 +784,63 @@ interface LauncherInvocation {
   viaComSpec?: boolean;
 }
 
+const EFFORT_SUFFIX = /-(minimal|low|medium|high|xhigh|max|ultra)$/;
+
+/** How far the assembled command line is over the platform's limit, or 0 when
+ *  it fits. Windows is the only platform that caps this low enough to matter. */
+export function argumentLimitOverrun(
+  invocation: LauncherInvocation,
+  platform: NodeJS.Platform = process.platform,
+): number {
+  if (platform !== 'win32') {
+    return 0;
+  }
+  const viaComSpec = invocation.viaComSpec ?? /(?:^|[\\/])cmd\.exe$/i.test(invocation.command);
+  const limit = viaComSpec ? 8000 : 32000;
+  const commandLine = [invocation.command, ...invocation.args].join(' ');
+  return Math.max(0, commandLine.length - limit);
+}
+
+/** Drop every effort-variant worker in place, returning the names removed.
+ *  Effort variants multiply each model by its reasoning levels (OpenAI alone
+ *  ships four models across six levels), so they dominate the command line
+ *  while adding no model the base worker cannot reach via /effort. Mutates the
+ *  caller's object so the permission loader and agent catalog, which hold the
+ *  same reference, stay in step with what actually gets registered. */
+export function dropEffortVariants(agents: Record<string, AgentDefinition>): string[] {
+  const dropped: string[] = [];
+  for (const name of Object.keys(agents)) {
+    const base = name.replace(EFFORT_SUFFIX, '');
+    const sibling = agents[base];
+    if (base === name || !sibling) {
+      // No unsuffixed sibling to fall back on, so this row is the only way to
+      // reach its model — a model whose own id merely ends in an effort word.
+      continue;
+    }
+    // OpenAI and Zen spell a variant as the same model at another effort.
+    // Antigravity advertises each level as its own model id, so the sibling's
+    // model differs; its declared effort is what marks it reachable via /effort
+    // from the base row the picker groups it under.
+    if (sibling.model === agents[name].model || agents[name].effort !== undefined) {
+      delete agents[name];
+      dropped.push(name);
+    }
+  }
+  return dropped;
+}
+
 export function checkLauncherArgumentLimit(
   agents: Record<string, AgentDefinition>,
   invocation: LauncherInvocation,
   executable: string,
   platform: NodeJS.Platform = process.platform,
 ): void {
-  if (platform !== 'win32') {
+  if (argumentLimitOverrun(invocation, platform) === 0) {
     return;
   }
   const viaComSpec = invocation.viaComSpec ?? /(?:^|[\\/])cmd\.exe$/i.test(invocation.command);
   const limit = viaComSpec ? 8000 : 32000;
   const commandLine = [invocation.command, ...invocation.args].join(' ');
-  if (commandLine.length <= limit) {
-    return;
-  }
   const providers = new Map<string, number>();
   for (const [name, agent] of Object.entries(agents)) {
     const provider = agent.model.split('/')[1] ?? 'unknown';
@@ -741,7 +856,7 @@ export function checkLauncherArgumentLimit(
     .join(', ');
   const shim = viaComSpec ? ' cmd.exe shim' : '';
   throw new Error(
-    `Native worker registration needs ${commandLine.length.toLocaleString('en-US')} characters for ${executable}, above the Windows${shim} limit of ${limit.toLocaleString('en-US')}. Largest providers: ${largest || 'none'}. Disable providers or extra models to reduce the launcher arguments.`,
+    `Native worker registration needs ${commandLine.length.toLocaleString('en-US')} characters for ${executable}, above the Windows${shim} limit of ${limit.toLocaleString('en-US')}, even after dropping effort variants. Largest providers: ${largest || 'none'}. Narrow a provider with MULTI_ZEN_MODELS, MULTI_GO_MODELS or MULTI_GROK_MODELS ("none" hides one entirely), or disable a provider plugin.`,
   );
 }
 
@@ -865,6 +980,14 @@ function filterPicker(
   if (selection === 'all') {
     return;
   }
+  // An actual "" selection already hides every row (models below ends up empty),
+  // but Windows PowerShell drops an empty-string env var before it reaches this
+  // process, so "" and unset are indistinguishable there. "none" is a
+  // Windows-safe, non-empty way to ask for the same result.
+  if (selection === 'none') {
+    settings.modelPicker.options = [];
+    return;
+  }
   const additive = selection.startsWith('+');
   const models = [
     ...new Set(
@@ -966,9 +1089,31 @@ async function handleCommand(command?: string) {
     console.log(JSON.stringify(ZEN_MODELS, null, 2));
     process.exit(0);
   }
+  if (command === '--go-models') {
+    const result = await refreshGoModels();
+    if (result.status !== 'available') {
+      console.log(JSON.stringify(result, null, 2));
+      process.exit(1);
+    }
+    console.log(JSON.stringify(result.models, null, 2));
+    process.exit(0);
+  }
+  if (command === '--openai-models') {
+    const codexAuth = path.join(
+      process.env.CODEX_HOME || path.join(os.homedir(), '.codex'),
+      'auth.json',
+    );
+    const result = await refreshOpenAIModels(codexAuth);
+    if (result.status !== 'available') {
+      console.log(JSON.stringify(result, null, 2));
+      process.exit(1);
+    }
+    console.log(JSON.stringify(result.models, null, 2));
+    process.exit(0);
+  }
   if (command === '--help') {
     console.log(
-      'Usage: node plugins/multi-core/src/launcher.ts [--cursor-login | --cursor-models | --zen-models | --antigravity-models | --antigravity-setup] [-- <claude arguments>]\nLaunch Claude with external models and native coding workers.\n--cursor-login: official Cursor SDK browser sign-in\n--cursor-models: list account model choices and worker names\n--zen-models: list supported Zen models and capabilities\nMULTI_ANTIGRAVITY=1: enable native Antigravity models and workers\n--antigravity-setup: install the scoped native permission hook\n--antigravity-models: inspect the official Antigravity CLI catalog (native login required)\n--grok-models: list the Grok Build catalog (native login required)\nMULTI_GROK_MODELS: comma-separated Grok model IDs to show, leaving other providers unchanged\nOPENCODE_API_KEY: Zen key (or use OpenCode /connect)\nMULTI_ZEN_MODELS: comma-separated Zen model IDs to show, leaving other providers unchanged\nMULTI_MODELS: comma-separated full model IDs to show in /model (unset: defaults; empty: hide external rows)\nMULTI_CURSOR_EXTRA_MODELS: comma-separated Cursor model IDs to add to Auto, Grok 4.6, and Composer 2.5 in /model',
+      'Usage: node plugins/multi-core/src/launcher.ts [--cursor-login | --cursor-models | --zen-models | --go-models | --openai-models | --antigravity-models | --antigravity-setup] [-- <claude arguments>]\nLaunch Claude with external models and native coding workers.\n--cursor-login: official Cursor SDK browser sign-in\n--cursor-models: list account model choices and worker names\n--zen-models: list supported Zen models and capabilities\n--go-models: fetch the live OpenCode Go catalog (Go entitlement required)\n--openai-models: fetch the live Codex catalog for this account (sign-in required)\nMULTI_OPENAI_MODELS: comma-separated Codex model IDs, "all" for every entitled model, or "none" to hide Codex entirely\nMULTI_ANTIGRAVITY=1: enable native Antigravity models and workers\n--antigravity-setup: install the scoped native permission hook\n--antigravity-models: inspect the official Antigravity CLI catalog (native login required)\n--grok-models: list the Grok Build catalog (native login required)\nMULTI_GROK_MODELS: comma-separated Grok model IDs to show, leaving other providers unchanged (or "none" to hide Grok entirely)\nOPENCODE_API_KEY: Zen key (or use OpenCode /connect)\nMULTI_ZEN_MODELS: comma-separated Zen model IDs to show, leaving other providers unchanged (or "none" to hide Zen entirely)\nMULTI_GO_MODELS: comma-separated OpenCode Go model IDs, "all" for the full live catalog, or "none" to hide Go entirely (unset: curated default)\nMULTI_MODELS: comma-separated full model IDs to show in /model (unset: defaults; "none" or empty to hide external rows)\nMULTI_CURSOR_EXTRA_MODELS: comma-separated Cursor model IDs to add to Auto, Grok 4.6, and Composer 2.5 in /model\nNote: on Windows PowerShell, $env:VAR="" does not reach this process (the empty value is dropped); use "none" instead of "" for any of the above',
     );
     process.exit(0);
   }
@@ -1099,18 +1244,32 @@ function pickerSettings(
   fullCatalog = false,
 ) {
   let zenOptions = zenPickerOptions('');
+  // Go shares no id namespace guarantee with Zen (the same bare id, e.g.
+  // "kimi-k3", can legitimately exist in both catalogs), so it uses its own
+  // MULTI_GO_MODELS selection rather than reusing MULTI_ZEN_MODELS: an id
+  // meant for one would misresolve or wrongly throw against the other's own
+  // picker.
+  //
+  // The picker reaches Claude as a settings *file*, so rows cost nothing
+  // against the Windows command-line limit that bounds named workers. Every
+  // live-discovered Go model is therefore selectable by default, and routing
+  // resolves against the same live catalog; only goWorkers() stays curated.
+  let goOptions = goPickerOptions('');
   if (zen) {
     zenOptions = fullCatalog ? zenModelOptions() : zenPickerOptions(process.env.MULTI_ZEN_MODELS);
+    goOptions = goPickerOptions(process.env.MULTI_GO_MODELS ?? 'all');
   }
   const settings: LaunchSettings = {
     modelPicker: {
       options: [
-        ...Object.values(codexSignedIn ? MODELS : {}).map((model) => ({
-          model: `multi/openai/${model}`,
-          label: model,
-          description: 'OpenAI subscription · native Claude Code harness',
-          behavesAs: pickerProfile(true),
-        })),
+        ...(codexSignedIn ? openaiPickerOptions(process.env.MULTI_OPENAI_MODELS) : []).map(
+          (option) => ({
+            model: option.model,
+            label: option.label,
+            description: `${option.description} · OpenAI subscription · ${Math.round(option.contextWindow / 1000)}K context`,
+            behavesAs: pickerProfile(true),
+          }),
+        ),
         ...cursorPicker.map(({ model, label, description, catalog }) => ({
           model,
           label,
@@ -1137,6 +1296,12 @@ function pickerSettings(
           label: `Zen · ${label}`,
           behavesAs: pickerProfile(Boolean(efforts?.length)),
           description: `Zen API billing · Claude tools${efforts ? '' : ' · native reasoning; /effort not applicable'}`,
+        })),
+        ...goOptions.map(({ model, label, efforts }) => ({
+          model,
+          label: `Go · ${label}`,
+          behavesAs: pickerProfile(Boolean(efforts?.length)),
+          description: `OpenCode Go subscription · Claude tools${efforts ? '' : ' · native reasoning; /effort not applicable'}`,
         })),
       ],
     },
@@ -1179,6 +1344,12 @@ function gatewayEnvironment(port: number, token: string, anthropic: boolean, cur
     ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`,
     // A custom base URL disables Claude's on-demand tool loading unless opted in.
     // We forward Claude tool references; preserve an explicit user preference.
+    // Forcing this to 'false' was tried and reverted: it stops every tool from
+    // deferring, not just the ones that need it, so a session with several MCP
+    // servers configured sent all of their schemas plus every Claude Code
+    // built-in on every request -- confirmed live at 50 tools in one call,
+    // which some providers reject outright. See direct-tools.ts instead, which
+    // names the specific tools that must bypass deferral.
     ENABLE_TOOL_SEARCH: process.env.ENABLE_TOOL_SEARCH ?? 'auto',
     MULTI_GATEWAY_TOKEN: token,
     MULTI_CURSOR_DISPLAY_TOOLS: cursor ? '1' : '0',

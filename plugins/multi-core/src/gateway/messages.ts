@@ -42,6 +42,17 @@ interface Tool {
   description?: string;
   input_schema?: unknown;
   defer_loading?: boolean;
+  /** web_search_* server tool fields (Anthropic's web search tool definition). */
+  max_uses?: number;
+  allowed_domains?: string[];
+  blocked_domains?: string[];
+  user_location?: {
+    type: 'approximate';
+    city?: string;
+    region?: string;
+    country?: string;
+    timezone?: string;
+  };
 }
 
 interface ToolChoice {
@@ -83,10 +94,33 @@ interface Usage {
   cache_creation_input_tokens?: number;
 }
 
+export interface WebSearchResult {
+  type: 'web_search_result';
+  url: string;
+  title: string;
+  encrypted_content: string;
+  page_age?: string;
+}
+
+export interface WebSearchResultError {
+  type: 'web_search_tool_result_error';
+  error_code: string;
+}
+
+export interface WebSearchCitation {
+  type: 'web_search_result_location';
+  url: string;
+  title: string;
+  encrypted_index: string;
+  cited_text: string;
+}
+
 export type ResponseContentBlock =
-  | { type: 'text'; text: string }
+  | { type: 'text'; text: string; citations?: WebSearchCitation[] }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
-  | { type: 'thinking'; thinking: string; signature: string };
+  | { type: 'thinking'; thinking: string; signature: string }
+  | { type: 'server_tool_use'; id: string; name: string; input: unknown }
+  | { type: 'web_search_tool_result'; tool_use_id: string; content: WebSearchResult[] | WebSearchResultError };
 
 export interface MessagesResponse {
   id: string;

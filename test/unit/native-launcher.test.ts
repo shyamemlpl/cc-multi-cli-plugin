@@ -8,7 +8,9 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { AgentCatalog } from '../../plugins/multi-core/src/gateway/agent-catalog.ts';
 import {
+  argumentLimitOverrun,
   checkLauncherArgumentLimit,
+  dropEffortVariants,
   workerDefinitions,
 } from '../../plugins/multi-core/src/launcher.ts';
 import { cursorModelOptions, cursorPickerOptions } from '../../plugins/multi-cursor/src/models.ts';
@@ -613,7 +615,7 @@ test('worker registration follows selected models and retains their effort alias
   const agents = workerDefinitions(true, [], true, [], [], selected);
   assert.deepEqual(new Set(Object.values(agents).map((worker) => worker.model)), new Set(selected));
   assert.equal(Object.keys(agents).length, 12);
-  assert.equal(agents['openai-luna-high'].effort, 'high');
+  assert.equal(agents['openai-5.6-luna-high'].effort, 'high');
   assert.equal(agents['zen-gpt-5.6-sol-max'].effort, 'max');
   assert.deepEqual(workerDefinitions(true, [], true, [], [], []), {});
 });
@@ -674,7 +676,7 @@ test('launcher argument limits are platform-aware and identify largest providers
   };
   assert.throws(
     () => checkLauncherArgumentLimit(agents, invocation, 'claude.exe', 'win32'),
-    /above the Windows limit of 32,000.*openai.*Disable providers or extra models/,
+    /above the Windows limit of 32,000.*openai.*MULTI_ZEN_MODELS/,
   );
   assert.doesNotThrow(() =>
     checkLauncherArgumentLimit(
@@ -693,6 +695,69 @@ test('launcher argument limits are platform-aware and identify largest providers
         'win32',
       ),
     /Windows cmd.exe shim limit of 8,000/,
+  );
+});
+
+test('effort variants are shed to fit the command line, keeping one worker per model', () => {
+  const agents = {
+    'openai-luna': { model: 'multi/openai/luna', description: '', prompt: '', tools: ['Read'] },
+    'openai-luna-low': { model: 'multi/openai/luna', description: '', prompt: '', tools: ['Read'] },
+    'openai-luna-high': {
+      model: 'multi/openai/luna',
+      description: '',
+      prompt: '',
+      tools: ['Read'],
+    },
+    // Shares the variant spelling but serves its own model, so it is not a variant.
+    'zen-go-grok-4.7-max': {
+      model: 'multi/zen/go/grok-4.7-max',
+      description: '',
+      prompt: '',
+      tools: ['Read'],
+    },
+    'zen-go-kimi-k3': {
+      model: 'multi/zen/go/kimi-k3',
+      description: '',
+      prompt: '',
+      tools: ['Read'],
+    },
+    // Antigravity advertises each reasoning level as its own model id, so the
+    // base row's model differs; the declared effort marks it /effort-reachable.
+    'antigravity-gemini-3.8-flash': {
+      model: 'multi/antigravity/gemini-3.8-flash',
+      description: '',
+      prompt: '',
+      tools: ['Read'],
+    },
+    'antigravity-gemini-3.8-flash-high': {
+      model: 'multi/antigravity/gemini-3.8-flash-high',
+      description: '',
+      prompt: '',
+      tools: ['Read'],
+      effort: 'high' as const,
+    },
+  };
+  const dropped = dropEffortVariants(agents);
+  assert.deepEqual(dropped.sort(), [
+    'antigravity-gemini-3.8-flash-high',
+    'openai-luna-high',
+    'openai-luna-low',
+  ]);
+  assert.deepEqual(Object.keys(agents).sort(), [
+    'antigravity-gemini-3.8-flash',
+    'openai-luna',
+    'zen-go-grok-4.7-max',
+    'zen-go-kimi-k3',
+  ]);
+});
+
+test('argument limit overrun is reported only for Windows command lines that exceed it', () => {
+  const overLimit = { command: 'cmd.exe', args: ['/c', 'claude.cmd', 'x'.repeat(8000)] };
+  assert.equal(argumentLimitOverrun(overLimit, 'darwin'), 0);
+  assert.ok(argumentLimitOverrun(overLimit, 'win32') > 0);
+  assert.equal(
+    argumentLimitOverrun({ command: 'cmd.exe', args: ['/c', 'x'.repeat(100)] }, 'win32'),
+    0,
   );
 });
 

@@ -110,6 +110,13 @@ export function grokPickerOptions(models: readonly GrokModel[], selection?: stri
   if (selection === undefined) {
     return [...models].sort((left, right) => Number(right.default) - Number(left.default));
   }
+  // "" already selects nothing (the split below yields no ids), but Windows
+  // PowerShell drops an empty-string env var before Node ever sees it, so ""
+  // and unset are indistinguishable there. "none" is a Windows-safe,
+  // non-empty way to ask for the same result.
+  if (selection === 'none') {
+    return [];
+  }
   const wanted = [
     ...new Set(
       selection

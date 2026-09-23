@@ -98,6 +98,27 @@ test('invokes a canonical npm cmd shim with Node directly', () => {
   assert.deepEqual(seen, [target]);
 });
 
+test('spawns a native npm shim target directly rather than through cmd.exe', () => {
+  // Claude Code's own shim forwards to a packaged executable, not a script.
+  // Going through cmd.exe would cap the command line at 8,000 characters and
+  // cost most of the native workers (see checkLauncherArgumentLimit).
+  const target = 'C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe';
+  assert.deepEqual(
+    executableInvocation(
+      'C:\\npm\\claude.cmd',
+      ['--agents', '{"worker":{}}'],
+      'win32',
+      {},
+      {
+        readShim: () =>
+          '"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*',
+        exists: (filename) => filename === target,
+      },
+    ),
+    { command: target, args: ['--agents', '{"worker":{}}'], viaComSpec: false },
+  );
+});
+
 test('resolves npm layouts in bat shims', () => {
   const target = 'C:\\tools\\node_modules\\claude\\cli.mjs';
   assert.deepEqual(
