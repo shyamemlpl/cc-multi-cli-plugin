@@ -84,11 +84,12 @@ export function executableInvocation(
   }
   const shimTarget = resolveNpmShimTarget(executable, shimOptions);
   if (shimTarget) {
-    return {
-      command: process.execPath,
-      args: [shimTarget, ...args],
-      viaComSpec: false,
-    };
+    // A native target is the program itself; a script target still needs the
+    // Node that would have run it. Either way the spawn is direct, so the
+    // command line is not subject to cmd.exe's limit.
+    return /\.exe$/i.test(shimTarget)
+      ? { command: shimTarget, args: [...args], viaComSpec: false }
+      : { command: process.execPath, args: [shimTarget, ...args], viaComSpec: false };
   }
   const command = environmentValue(env, 'ComSpec') ?? process.env.ComSpec ?? 'cmd.exe';
   const commandLine = [quoteWindows(executable), ...args.map(quoteWindows)].join(' ');
@@ -101,7 +102,12 @@ export function executableInvocation(
 }
 
 const MAX_SHIM_SIZE = 32 * 1024;
-const SHIM_TARGET = /"%dp0%\\([^"\r\n]+\.(?:js|cjs|mjs))"[ \t]+%\*/gi;
+// npm writes a .cmd shim that forwards to the package's real entry point. That
+// entry point used to always be a script; Claude Code now ships a native
+// executable, so both spellings have to be recognised or the launch falls back
+// to cmd.exe and its 8,000-character command line (see
+// checkLauncherArgumentLimit) instead of the 32,000 a direct spawn allows.
+const SHIM_TARGET = /"%dp0%\\([^"\r\n]+\.(?:js|cjs|mjs|exe))"[ \t]+%\*/gi;
 
 function resolveNpmShimTarget(
   executable: string,

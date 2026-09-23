@@ -700,11 +700,15 @@ export function workerDefinitions(
       ...(option.effort ? { effort: option.effort } : {}),
     };
   }
-  // Named workers, unlike picker rows, are serialized into the command line,
-  // so they stay on the curated default even though the picker offers every
-  // live Go model (see pickerSettings). Selecting an unworkered Go model in
-  // /model still routes fine; only delegation to a named worker needs one.
-  const goWorkerIds = goPickerOptions(process.env.MULTI_GO_MODELS).map((option) => option.id);
+  // Workers track the picker exactly: every model selectable in /model can also
+  // be delegated to by name. Spawning the real executable rather than a cmd.exe
+  // shim (see executableInvocation) leaves 32,000 characters for the whole
+  // command line, which the full catalog fits inside; a setup that still falls
+  // back to cmd.exe sheds effort variants first and names MULTI_GO_MODELS if
+  // that is not enough.
+  const goWorkerIds = goPickerOptions(process.env.MULTI_GO_MODELS ?? 'all').map(
+    (option) => option.id,
+  );
   for (const [name, option] of Object.entries(zen ? goWorkers(goWorkerIds) : {})) {
     agents[name] = {
       description: `OpenCode Go ${option.model}${option.effort ? `, ${option.effort} effort` : ''}. Uses native Claude Code tools.`,
